@@ -49,8 +49,10 @@ export class MachineAgent {
     return new Promise((resolve, reject) => {
       const url = `${this.config.hubUrl}/ws/machine?token=${this.config.registrationToken}`
       this.ws = new WebSocket(url)
+      let connected = false
 
       this.ws.on('open', () => {
+        connected = true
         console.log(`[agent] Connected to hub as "${this.config.machineName}"`)
         this.sendToHub({
           type: 'machine_hello',
@@ -70,7 +72,8 @@ export class MachineAgent {
 
       this.ws.on('close', () => {
         console.log('[agent] Disconnected from hub')
-        if (this.shouldReconnect) {
+        // Only reconnect if we previously connected successfully
+        if (connected && this.shouldReconnect) {
           const delay = this.config.reconnectIntervalMs ?? 5000
           console.log(`[agent] Reconnecting in ${delay}ms...`)
           this.reconnectTimer = setTimeout(() => {
@@ -81,7 +84,9 @@ export class MachineAgent {
 
       this.ws.on('error', (err) => {
         console.error('[agent] WebSocket error:', err.message)
-        reject(err)
+        if (!connected) {
+          reject(err)
+        }
       })
     })
   }

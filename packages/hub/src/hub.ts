@@ -319,8 +319,11 @@ export class Hub {
     })
 
     ws.on('close', () => {
-      this.machines.delete(machine.id)
-      this.broadcastMachineList(machine.accountId)
+      // Only delete if this is still the active connection (avoids race on reconnect)
+      if (this.machines.get(machine.id)?.ws === ws) {
+        this.machines.delete(machine.id)
+        this.broadcastMachineList(machine.accountId)
+      }
     })
   }
 
