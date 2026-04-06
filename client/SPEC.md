@@ -29,7 +29,8 @@ The CC Commander client app. Runs on iOS, macOS, and later as a web app.
 1. Tap "New Session"
 2. Pick a machine (shows online/offline)
 3. Pick or type a directory
-4. Type your prompt
+4. Optionally configure session settings (available tools, max turns, max budget, etc.)
+5. Type your prompt
 
 ## Multi-device
 
