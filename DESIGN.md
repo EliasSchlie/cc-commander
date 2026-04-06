@@ -10,22 +10,22 @@
 [Web]    ---+                    +--- [Mac Mini agent]
 ```
 
-- **Devices** (left) connect to the hub over HTTPS/WSS
-- **Machine agents** (right) connect outbound to the hub over WSS
+- **Clients** (left) connect to the hub over HTTPS/WSS
+- **Agents** (right) connect outbound to the hub over WSS
 - The hub routes messages between them
-- No device ever talks directly to a machine
+- No client ever talks directly to an agent
 - The hub is a single central server shared by all users (multi-tenant)
 
 ## Components
 
-### Machine Agent (Node.js)
+### Agent (Node.js)
 
 A small process that runs on each machine. It:
 - Connects outbound to the hub via WebSocket
 - Authenticates with a registration token (scoped to one account)
 - Runs Claude Agent SDK `query()` calls on behalf of the user
 - Streams SDK events to the hub
-- Uses `bypassPermissions` + `canUseTool` so tools execute freely but user-interaction tools (AskUserQuestion, etc.) are relayed to the device
+- Uses `bypassPermissions` + `canUseTool` so tools execute freely but user-interaction tools (AskUserQuestion, etc.) are relayed to the client
 
 A machine can have multiple independent agent installs for different accounts. Each install has its own registration token and only sees its own sessions.
 
@@ -35,15 +35,15 @@ The agent is essentially the web UI prototype (`4b-web-ui-interactive.mjs` from 
 
 A single central server that:
 - Manages user accounts (registration, login)
-- Authenticates devices (JWT) and machines (registration tokens)
-- Maintains WebSocket connections to all connected machines and devices
-- Routes messages: device -> machine (prompts, answers) and machine -> device (stream events)
+- Authenticates clients (JWT) and agents (registration tokens)
+- Maintains WebSocket connections to all connected agents and clients
+- Routes messages: client -> agent (prompts, answers) and agent -> client (stream events)
 - Stores session metadata in a database (which machine, directory, status, last activity, last message preview)
-- Syncs session list to all connected devices for the same account
+- Syncs session list to all connected clients for the same account
 - Does NOT interpret Claude SDK messages -- it relays them opaquely
-- Enforces account isolation: devices can only interact with machines registered to their account
+- Enforces account isolation: clients can only interact with agents registered to their account
 
-### Device App (SwiftUI)
+### Client (SwiftUI)
 
 A native iOS/macOS app using SwiftUI. Shared codebase with platform-specific layout:
 - `NavigationSplitView` on macOS (sidebar + detail)
@@ -55,7 +55,7 @@ A native iOS/macOS app using SwiftUI. Shared codebase with platform-specific lay
 
 ## SDK Integration
 
-The machine agent uses the Claude Agent SDK `query()` function:
+The agent uses the Claude Agent SDK `query()` function:
 
 ```js
 const options = {
@@ -65,7 +65,7 @@ const options = {
   canUseTool: async (toolName, input, opts) => {
     // Only fires for user-interaction tools (AskUserQuestion, etc.)
     // Execution tools are auto-approved by bypassPermissions.
-    // Relay to hub -> device, wait for response, return result.
+    // Relay to hub -> client, wait for response, return result.
   },
 };
 ```
@@ -74,20 +74,20 @@ Key properties:
 - `bypassPermissions` handles all execution tools silently
 - `canUseTool` only fires for user-interaction tools -- this is built into the SDK, not a filter we maintain
 - For `AskUserQuestion`: return `{ behavior: "allow", updatedInput: { questions, answers } }`
-- For unknown interaction tools: relay allow/deny to device
+- For unknown interaction tools: relay allow/deny to client
 
 ## Message Flow
 
-### Device sends a prompt
+### Client sends a prompt
 
 ```
-Device --[WSS]--> Hub --[WSS]--> Machine Agent
-                                      |
-                                  query(prompt)
-                                      |
-                               SDK streams events
-                                      |
-Machine Agent --[WSS]--> Hub --[WSS]--> Device(s)
+Client --[WSS]--> Hub --[WSS]--> Agent
+                                   |
+                               query(prompt)
+                                   |
+                            SDK streams events
+                                   |
+Agent --[WSS]--> Hub --[WSS]--> Client(s)
 ```
 
 ### Claude asks a question (AskUserQuestion)
@@ -95,11 +95,11 @@ Machine Agent --[WSS]--> Hub --[WSS]--> Device(s)
 ```
 SDK fires canUseTool("AskUserQuestion", input)
   |
-Machine Agent --[WSS]--> Hub --[WSS]--> Device(s)
-  |                                        |
-  | (promise held)                    User picks option
-  |                                        |
-Machine Agent <--[WSS]-- Hub <--[WSS]-- Device
+Agent --[WSS]--> Hub --[WSS]--> Client(s)
+  |                                 |
+  | (promise held)             User picks option
+  |                                 |
+Agent <--[WSS]-- Hub <--[WSS]-- Client
   |
 canUseTool resolves with answers
   |
@@ -119,26 +119,26 @@ The hub stores lightweight metadata per session:
 - Last message preview (truncated text)
 - Created timestamp
 
-This powers the session picker on the device. Full conversation history stays on the machine (managed by the SDK).
+This powers the session picker on the client. Full conversation history stays on the machine (managed by the SDK).
 
 ## Security
 
 - Hub listens on HTTPS only
-- Machine agents connect outbound via WSS (no inbound ports needed)
+- Agents connect outbound via WSS (no inbound ports needed)
 - Machine registration: hub generates a one-time token scoped to an account, agent exchanges it for a persistent credential
-- Device auth: email/password or OAuth -> JWT
+- Client auth: email/password or OAuth -> JWT
 - JWTs are short-lived with refresh tokens
-- Machine agents only accept commands from the hub, never from devices directly
-- The hub validates that a device's commands target machines belonging to their account
+- Agents only accept commands from the hub, never from clients directly
+- The hub validates that a client's commands target agents belonging to their account
 - Multiple accounts on the same machine are fully isolated (separate agent installs, separate credentials, separate sessions)
 
 ## Session History on Device Switch
 
-When a device opens an existing session:
+When a client opens an existing session:
 1. Hub sends session metadata (machine, directory, status)
-2. Hub requests recent message history from the machine agent
-3. Machine agent reads from SDK session storage (`getSessionMessages`)
-4. Messages are relayed to the device
+2. Hub requests recent message history from the agent
+3. Agent reads from SDK session storage (`getSessionMessages`)
+4. Messages are relayed to the client
 5. If the session is active, live streaming resumes
 
-Devices don't store conversation history -- they fetch it on demand.
+Clients don't store conversation history -- they fetch it on demand.

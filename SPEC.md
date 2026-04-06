@@ -8,21 +8,21 @@ An app that lets you create, manage, and interact with Claude Code sessions on a
 
 Sessions run on the machines where your code lives. CC Commander is the remote control.
 
-## Devices and Machines
+## Clients and Machines
 
-A **device** is something you use to interact with sessions -- your phone, your laptop, a browser tab. It runs the CC Commander app. You can't run Claude Code sessions on a device (unless it's also registered as a machine).
+A **client** is something you use to interact with sessions -- your phone, your laptop, a browser tab. It runs the CC Commander app. You can't run Claude Code sessions on a client (unless it's also registered as a machine).
 
-A **machine** is something you run Claude Code sessions on -- a VPS, a Mac Mini, your MacBook. You register it once by running a command. It doesn't need the app installed.
+A **machine** is something you run Claude Code sessions on -- a VPS, a Mac Mini, your MacBook. It runs the CC Commander agent. You register it once by running a command. It doesn't need the app installed.
 
-A MacBook might be both: it has the app (device) and can run sessions (machine). A phone might only be a device. A VPS might only only be a machine.
+A MacBook might be both: it has the app (client) and can run sessions (machine). A phone might only be a client. A VPS might only be a machine.
 
 ## Hub
 
-A central server that all devices and machines connect to. There is one hub for all users. It manages user accounts, authenticates devices, routes messages between devices and machines, and keeps session state in sync.
+A central server that all clients and machines connect to. There is one hub for all users. It manages user accounts, authenticates clients, routes messages between clients and machines, and keeps session state in sync.
 
 ## Accounts
 
-An account is a collection of devices and machines. All devices logged into the same account see the same sessions on that account's machines. You can only see sessions that were started through CC Commander.
+An account is a collection of clients and machines. All clients logged into the same account see the same sessions on that account's machines. You can only see sessions that were started through CC Commander.
 
 A machine can be registered to multiple accounts. The installs are completely independent -- different accounts on the same machine don't see each other's sessions.
 
@@ -57,7 +57,7 @@ The app gives you a one-line command to run on the machine. The machine appears 
 
 ## Multi-device
 
-All devices logged into the same account see the same sessions. Start on laptop, pick up on phone. Both stay in sync.
+All clients logged into the same account see the same sessions. Start on laptop, pick up on phone. Both stay in sync.
 
 ## Platforms
 
