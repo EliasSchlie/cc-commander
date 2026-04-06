@@ -5,15 +5,15 @@
 ## Architecture
 
 ```
-[iPhone] ---+                    +--- [MacBook agent]
-[MacBook] --+--- Hub (VPS) -----+--- [VPS agent]
-[Web]    ---+                    +--- [Mac Mini agent]
+[iPhone] ---+                    +--- [MacBook runner]
+[MacBook] --+--- Hub (VPS) -----+--- [VPS runner]
+[Web]    ---+                    +--- [Mac Mini runner]
 ```
 
 - **Clients** (left) connect to the hub over HTTPS/WSS
-- **Agents** (right) connect outbound to the hub over WSS
+- **Runners** (right) connect outbound to the hub over WSS
 - The hub routes messages between them
-- No client ever talks directly to an agent
+- No client ever talks directly to a runner
 - The hub is a single central server shared by all users (multi-tenant)
 
 ## Repository Structure
@@ -25,7 +25,7 @@ cc-commander/
   SPEC.md                 # Product spec (source of truth)
   DESIGN.md               # Technical design
   hub/                    # Hub server (Node.js)
-  agent/                  # Machine agent (Node.js)
+  runner/                 # Machine runner (Node.js)
   client/
     SPEC.md               # Shared client spec
     swift/                # iOS + macOS app (SwiftUI)
@@ -41,7 +41,7 @@ Each component must:
 
 ## Components
 
-### Agent (Node.js)
+### Runner (Node.js)
 
 A small process that runs on each machine. It:
 - Connects outbound to the hub via WebSocket
@@ -50,21 +50,21 @@ A small process that runs on each machine. It:
 - Streams SDK events to the hub
 - Uses `bypassPermissions` + `canUseTool` so tools execute freely but user-interaction tools (AskUserQuestion, etc.) are relayed to the client
 
-A machine can have multiple independent agent installs for different accounts. Each install has its own registration token and only sees its own sessions.
+A machine can have multiple independent runner installs for different accounts. Each install has its own registration token and only sees its own sessions.
 
-The agent is essentially the web UI prototype (`4b-web-ui-interactive.mjs` from claude-code-wrapper) adapted to talk to the hub instead of serving HTTP directly.
+The runner is essentially the web UI prototype (`4b-web-ui-interactive.mjs` from claude-code-wrapper) adapted to talk to the hub instead of serving HTTP directly.
 
 ### Hub (Node.js)
 
 A single central server that:
 - Manages user accounts (registration, login)
-- Authenticates clients (JWT) and agents (registration tokens)
-- Maintains WebSocket connections to all connected agents and clients
-- Routes messages: client -> agent (prompts, answers) and agent -> client (stream events)
+- Authenticates clients (JWT) and runners (registration tokens)
+- Maintains WebSocket connections to all connected runners and clients
+- Routes messages: client -> runner (prompts, answers) and runner -> client (stream events)
 - Stores session metadata in a database (which machine, directory, status, last activity, last message preview)
 - Syncs session list to all connected clients for the same account
 - Does NOT interpret Claude SDK messages -- it relays them opaquely
-- Enforces account isolation: clients can only interact with agents registered to their account
+- Enforces account isolation: clients can only interact with runners registered to their account
 
 ### Client (SwiftUI)
 
@@ -78,7 +78,7 @@ A native iOS/macOS app using SwiftUI. Shared codebase with platform-specific lay
 
 ## SDK Integration
 
-The agent uses the Claude Agent SDK `query()` function:
+The runner uses the Claude Agent SDK `query()` function:
 
 ```js
 const options = {
@@ -104,13 +104,13 @@ Key properties:
 ### Client sends a prompt
 
 ```
-Client --[WSS]--> Hub --[WSS]--> Agent
+Client --[WSS]--> Hub --[WSS]--> Runner
                                    |
                                query(prompt)
                                    |
                             SDK streams events
                                    |
-Agent --[WSS]--> Hub --[WSS]--> Client(s)
+Runner --[WSS]--> Hub --[WSS]--> Client(s)
 ```
 
 ### Claude asks a question (AskUserQuestion)
@@ -118,11 +118,11 @@ Agent --[WSS]--> Hub --[WSS]--> Client(s)
 ```
 SDK fires canUseTool("AskUserQuestion", input)
   |
-Agent --[WSS]--> Hub --[WSS]--> Client(s)
+Runner --[WSS]--> Hub --[WSS]--> Client(s)
   |                                 |
   | (promise held)             User picks option
   |                                 |
-Agent <--[WSS]-- Hub <--[WSS]-- Client
+Runner <--[WSS]-- Hub <--[WSS]-- Client
   |
 canUseTool resolves with answers
   |
@@ -147,20 +147,20 @@ This powers the session picker on the client. Full conversation history stays on
 ## Security
 
 - Hub listens on HTTPS only
-- Agents connect outbound via WSS (no inbound ports needed)
-- Machine registration: hub generates a one-time token scoped to an account, agent exchanges it for a persistent credential
+- Runners connect outbound via WSS (no inbound ports needed)
+- Machine registration: hub generates a one-time token scoped to an account, runner exchanges it for a persistent credential
 - Client auth: email/password or OAuth -> JWT
 - JWTs are short-lived with refresh tokens
-- Agents only accept commands from the hub, never from clients directly
-- The hub validates that a client's commands target agents belonging to their account
-- Multiple accounts on the same machine are fully isolated (separate agent installs, separate credentials, separate sessions)
+- Runners only accept commands from the hub, never from clients directly
+- The hub validates that a client's commands target runners belonging to their account
+- Multiple accounts on the same machine are fully isolated (separate runner installs, separate credentials, separate sessions)
 
 ## Session History on Device Switch
 
 When a client opens an existing session:
 1. Hub sends session metadata (machine, directory, status)
-2. Hub requests recent message history from the agent
-3. Agent reads from SDK session storage (`getSessionMessages`)
+2. Hub requests recent message history from the runner
+3. Runner reads from SDK session storage (`getSessionMessages`)
 4. Messages are relayed to the client
 5. If the session is active, live streaming resumes
 
