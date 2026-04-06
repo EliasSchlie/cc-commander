@@ -1,54 +1,50 @@
-import Database from "better-sqlite3";
-import { randomUUID } from "node:crypto";
-import type {
-  SessionMeta,
-  SessionStatus,
-  MachineInfo,
-} from "@cc-commander/shared";
+import Database from 'better-sqlite3'
+import { randomUUID } from 'node:crypto'
+import type { SessionMeta, SessionStatus, MachineInfo } from '@cc-commander/shared'
 
 export interface AccountRow {
-  id: string;
-  email: string;
-  passwordHash: string;
-  createdAt: string;
+  id: string
+  email: string
+  passwordHash: string
+  createdAt: string
 }
 
 export interface MachineRow {
-  id: string;
-  accountId: string;
-  name: string;
-  registrationToken: string;
-  lastSeen: string;
-  createdAt: string;
+  id: string
+  accountId: string
+  name: string
+  registrationToken: string
+  lastSeen: string
+  createdAt: string
 }
 
 export interface SessionRow {
-  id: string;
-  accountId: string;
-  machineId: string;
-  directory: string;
-  status: SessionStatus;
-  lastActivity: string;
-  lastMessagePreview: string;
-  sdkSessionId: string | null;
-  createdAt: string;
+  id: string
+  accountId: string
+  machineId: string
+  directory: string
+  status: SessionStatus
+  lastActivity: string
+  lastMessagePreview: string
+  sdkSessionId: string | null
+  createdAt: string
 }
 
 export interface RefreshTokenRow {
-  token: string;
-  accountId: string;
-  expiresAt: string;
-  createdAt: string;
+  token: string
+  accountId: string
+  expiresAt: string
+  createdAt: string
 }
 
 export class HubDb {
-  private db: Database.Database;
+  private db: Database.Database
 
-  constructor(dbPath: string = ":memory:") {
-    this.db = new Database(dbPath);
-    this.db.pragma("journal_mode = WAL");
-    this.db.pragma("foreign_keys = ON");
-    this.migrate();
+  constructor(dbPath: string = ':memory:') {
+    this.db = new Database(dbPath)
+    this.db.pragma('journal_mode = WAL')
+    this.db.pragma('foreign_keys = ON')
+    this.migrate()
   }
 
   private migrate(): void {
@@ -87,118 +83,78 @@ export class HubDb {
         expires_at TEXT NOT NULL,
         created_at TEXT NOT NULL DEFAULT (datetime('now'))
       );
-    `);
+    `)
   }
 
   // ── Accounts ──────────────────────────────────────────────────────────
 
   createAccount(email: string, passwordHash: string): AccountRow {
-    const id = randomUUID();
+    const id = randomUUID()
     this.db
-      .prepare(
-        "INSERT INTO accounts (id, email, password_hash) VALUES (?, ?, ?)",
-      )
-      .run(id, email, passwordHash);
-    return this.getAccountById(id)!;
+      .prepare('INSERT INTO accounts (id, email, password_hash) VALUES (?, ?, ?)')
+      .run(id, email, passwordHash)
+    return this.getAccountById(id)!
   }
 
   getAccountByEmail(email: string): AccountRow | undefined {
     const row = this.db
-      .prepare(
-        "SELECT id, email, password_hash, created_at FROM accounts WHERE email = ?",
-      )
-      .get(email) as any;
-    return row
-      ? {
-          id: row.id,
-          email: row.email,
-          passwordHash: row.password_hash,
-          createdAt: row.created_at,
-        }
-      : undefined;
+      .prepare('SELECT id, email, password_hash, created_at FROM accounts WHERE email = ?')
+      .get(email) as any
+    return row ? toAccountRow(row) : undefined
   }
 
   getAccountById(id: string): AccountRow | undefined {
     const row = this.db
-      .prepare(
-        "SELECT id, email, password_hash, created_at FROM accounts WHERE id = ?",
-      )
-      .get(id) as any;
-    return row
-      ? {
-          id: row.id,
-          email: row.email,
-          passwordHash: row.password_hash,
-          createdAt: row.created_at,
-        }
-      : undefined;
+      .prepare('SELECT id, email, password_hash, created_at FROM accounts WHERE id = ?')
+      .get(id) as any
+    return row ? toAccountRow(row) : undefined
   }
 
   // ── Machines ──────────────────────────────────────────────────────────
 
   createMachine(accountId: string, name: string): MachineRow {
-    const id = randomUUID();
-    const registrationToken = randomUUID();
+    const id = randomUUID()
+    const registrationToken = randomUUID()
     this.db
       .prepare(
-        "INSERT INTO machines (id, account_id, name, registration_token) VALUES (?, ?, ?, ?)",
+        'INSERT INTO machines (id, account_id, name, registration_token) VALUES (?, ?, ?, ?)'
       )
-      .run(id, accountId, name, registrationToken);
-    return this.getMachineById(id)!;
+      .run(id, accountId, name, registrationToken)
+    return this.getMachineById(id)!
   }
 
   getMachineById(id: string): MachineRow | undefined {
     const row = this.db
       .prepare(
-        "SELECT id, account_id, name, registration_token, last_seen, created_at FROM machines WHERE id = ?",
+        'SELECT id, account_id, name, registration_token, last_seen, created_at FROM machines WHERE id = ?'
       )
-      .get(id) as any;
-    return row
-      ? {
-          id: row.id,
-          accountId: row.account_id,
-          name: row.name,
-          registrationToken: row.registration_token,
-          lastSeen: row.last_seen,
-          createdAt: row.created_at,
-        }
-      : undefined;
+      .get(id) as any
+    return row ? toMachineRow(row) : undefined
   }
 
   getMachineByToken(token: string): MachineRow | undefined {
     const row = this.db
       .prepare(
-        "SELECT id, account_id, name, registration_token, last_seen, created_at FROM machines WHERE registration_token = ?",
+        'SELECT id, account_id, name, registration_token, last_seen, created_at FROM machines WHERE registration_token = ?'
       )
-      .get(token) as any;
-    return row
-      ? {
-          id: row.id,
-          accountId: row.account_id,
-          name: row.name,
-          registrationToken: row.registration_token,
-          lastSeen: row.last_seen,
-          createdAt: row.created_at,
-        }
-      : undefined;
+      .get(token) as any
+    return row ? toMachineRow(row) : undefined
   }
 
   listMachinesForAccount(accountId: string): MachineInfo[] {
     const rows = this.db
-      .prepare("SELECT id, name, last_seen FROM machines WHERE account_id = ?")
-      .all(accountId) as any[];
+      .prepare('SELECT id, name, last_seen FROM machines WHERE account_id = ?')
+      .all(accountId) as any[]
     return rows.map((r) => ({
       machineId: r.id,
       name: r.name,
       online: false, // Caller sets this based on live connections
-      lastSeen: r.last_seen,
-    }));
+      lastSeen: r.last_seen
+    }))
   }
 
   updateMachineLastSeen(machineId: string): void {
-    this.db
-      .prepare("UPDATE machines SET last_seen = datetime('now') WHERE id = ?")
-      .run(machineId);
+    this.db.prepare("UPDATE machines SET last_seen = datetime('now') WHERE id = ?").run(machineId)
   }
 
   // ── Sessions ──────────────────────────────────────────────────────────
@@ -207,43 +163,32 @@ export class HubDb {
     accountId: string,
     machineId: string,
     directory: string,
+    status: SessionStatus = 'idle'
   ): SessionRow {
-    const id = randomUUID();
+    const id = randomUUID()
     this.db
       .prepare(
-        "INSERT INTO sessions (id, account_id, machine_id, directory) VALUES (?, ?, ?, ?)",
+        'INSERT INTO sessions (id, account_id, machine_id, directory, status) VALUES (?, ?, ?, ?, ?)'
       )
-      .run(id, accountId, machineId, directory);
-    return this.getSessionById(id)!;
+      .run(id, accountId, machineId, directory, status)
+    return this.getSessionById(id)!
   }
 
   getSessionById(id: string): SessionRow | undefined {
     const row = this.db
       .prepare(
-        "SELECT id, account_id, machine_id, directory, status, last_activity, last_message_preview, sdk_session_id, created_at FROM sessions WHERE id = ?",
+        'SELECT id, account_id, machine_id, directory, status, last_activity, last_message_preview, sdk_session_id, created_at FROM sessions WHERE id = ?'
       )
-      .get(id) as any;
-    return row
-      ? {
-          id: row.id,
-          accountId: row.account_id,
-          machineId: row.machine_id,
-          directory: row.directory,
-          status: row.status,
-          lastActivity: row.last_activity,
-          lastMessagePreview: row.last_message_preview,
-          sdkSessionId: row.sdk_session_id,
-          createdAt: row.created_at,
-        }
-      : undefined;
+      .get(id) as any
+    return row ? toSessionRow(row) : undefined
   }
 
   listSessionsForAccount(accountId: string): SessionMeta[] {
     const rows = this.db
       .prepare(
-        "SELECT id, account_id, machine_id, directory, status, last_activity, last_message_preview, created_at FROM sessions WHERE account_id = ? ORDER BY last_activity DESC",
+        'SELECT id, account_id, machine_id, directory, status, last_activity, last_message_preview, created_at FROM sessions WHERE account_id = ? ORDER BY last_activity DESC'
       )
-      .all(accountId) as any[];
+      .all(accountId) as any[]
     return rows.map((r) => ({
       sessionId: r.id,
       accountId: r.account_id,
@@ -252,69 +197,97 @@ export class HubDb {
       status: r.status,
       lastActivity: r.last_activity,
       lastMessagePreview: r.last_message_preview,
-      createdAt: r.created_at,
-    }));
+      createdAt: r.created_at
+    }))
   }
 
-  updateSessionStatus(
-    sessionId: string,
-    status: SessionStatus,
-    preview?: string,
-  ): void {
+  updateSessionStatus(sessionId: string, status: SessionStatus, preview?: string): void {
     if (preview !== undefined) {
       this.db
         .prepare(
-          "UPDATE sessions SET status = ?, last_activity = datetime('now'), last_message_preview = ? WHERE id = ?",
+          "UPDATE sessions SET status = ?, last_activity = datetime('now'), last_message_preview = ? WHERE id = ?"
         )
-        .run(status, preview, sessionId);
+        .run(status, preview, sessionId)
     } else {
       this.db
-        .prepare(
-          "UPDATE sessions SET status = ?, last_activity = datetime('now') WHERE id = ?",
-        )
-        .run(status, sessionId);
+        .prepare("UPDATE sessions SET status = ?, last_activity = datetime('now') WHERE id = ?")
+        .run(status, sessionId)
     }
   }
 
   updateSessionSdkId(sessionId: string, sdkSessionId: string): void {
     this.db
-      .prepare("UPDATE sessions SET sdk_session_id = ? WHERE id = ?")
-      .run(sdkSessionId, sessionId);
+      .prepare('UPDATE sessions SET sdk_session_id = ? WHERE id = ?')
+      .run(sdkSessionId, sessionId)
   }
 
   // ── Refresh Tokens ────────────────────────────────────────────────────
 
   createRefreshToken(accountId: string, expiresAt: string): string {
-    const token = randomUUID();
+    const token = randomUUID()
     this.db
-      .prepare(
-        "INSERT INTO refresh_tokens (token, account_id, expires_at) VALUES (?, ?, ?)",
-      )
-      .run(token, accountId, expiresAt);
-    return token;
+      .prepare('INSERT INTO refresh_tokens (token, account_id, expires_at) VALUES (?, ?, ?)')
+      .run(token, accountId, expiresAt)
+    return token
   }
 
   getRefreshToken(token: string): RefreshTokenRow | undefined {
     const row = this.db
       .prepare(
-        "SELECT token, account_id, expires_at, created_at FROM refresh_tokens WHERE token = ?",
+        'SELECT token, account_id, expires_at, created_at FROM refresh_tokens WHERE token = ?'
       )
-      .get(token) as any;
+      .get(token) as any
     return row
       ? {
           token: row.token,
           accountId: row.account_id,
           expiresAt: row.expires_at,
-          createdAt: row.created_at,
+          createdAt: row.created_at
         }
-      : undefined;
+      : undefined
   }
 
   deleteRefreshToken(token: string): void {
-    this.db.prepare("DELETE FROM refresh_tokens WHERE token = ?").run(token);
+    this.db.prepare('DELETE FROM refresh_tokens WHERE token = ?').run(token)
   }
 
   close(): void {
-    this.db.close();
+    this.db.close()
+  }
+}
+
+// ── Row mappers ───────────────────────────────────────────────────────────
+
+function toAccountRow(row: any): AccountRow {
+  return {
+    id: row.id,
+    email: row.email,
+    passwordHash: row.password_hash,
+    createdAt: row.created_at
+  }
+}
+
+function toMachineRow(row: any): MachineRow {
+  return {
+    id: row.id,
+    accountId: row.account_id,
+    name: row.name,
+    registrationToken: row.registration_token,
+    lastSeen: row.last_seen,
+    createdAt: row.created_at
+  }
+}
+
+function toSessionRow(row: any): SessionRow {
+  return {
+    id: row.id,
+    accountId: row.account_id,
+    machineId: row.machine_id,
+    directory: row.directory,
+    status: row.status,
+    lastActivity: row.last_activity,
+    lastMessagePreview: row.last_message_preview,
+    sdkSessionId: row.sdk_session_id,
+    createdAt: row.created_at
   }
 }
