@@ -41,6 +41,8 @@ export class Hub {
   config: HubConfig;
   clients: Map<string, ClientConnection>;
   agents: Map<string, AgentConnection>;
+  /** Maps requestId -> ClientConnection for pending history requests */
+  pendingHistoryRequests: Map<string, ClientConnection>;
   httpServer: ReturnType<typeof createServer>;
   wss: WebSocketServer;
 
@@ -48,6 +50,7 @@ export class Hub {
     this.config = config;
     this.clients = new Map();
     this.agents = new Map();
+    this.pendingHistoryRequests = new Map();
 
     this.httpServer = createServer((req, res) => this.handleHttp(req, res));
     this.wss = new WebSocketServer({ server: this.httpServer });
@@ -309,6 +312,7 @@ export class Hub {
     const result = this.resolveSessionAgent(conn, msg.sessionId);
     if (!result) return;
     const requestId = randomUUID();
+    this.pendingHistoryRequests.set(requestId, conn);
     this.sendToAgent(result.agentConn, {
       type: "hub_get_history",
       sessionId: msg.sessionId,
@@ -393,9 +397,19 @@ export class Hub {
       case "tool_call":
       case "tool_result":
       case "user_prompt":
-      case "session_history":
         this.relayToClients(conn.accountId, msg);
         break;
+
+      case "session_history": {
+        const requestingClient = this.pendingHistoryRequests.get(msg.requestId);
+        this.pendingHistoryRequests.delete(msg.requestId);
+        if (requestingClient) {
+          this.sendToClient(requestingClient, msg);
+        } else {
+          this.relayToClients(conn.accountId, msg);
+        }
+        break;
+      }
 
       case "session_status":
         this.config.db.updateSessionStatus(

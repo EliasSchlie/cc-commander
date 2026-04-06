@@ -102,6 +102,11 @@ export class MachineAgent {
     }
     for (const [, session] of this.sessions) {
       session.abortController.abort();
+      // Reject any pending prompt promises so canUseTool doesn't hang
+      for (const [, resolver] of session.pendingPrompts) {
+        resolver({ kind: "deny", message: "Agent disconnected" });
+      }
+      session.pendingPrompts.clear();
     }
     this.sessions.clear();
     if (this.ws) {
