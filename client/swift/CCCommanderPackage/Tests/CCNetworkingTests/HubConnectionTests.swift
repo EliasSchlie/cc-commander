@@ -4,6 +4,7 @@ import Foundation
 @testable import CCModels
 
 @Suite("HubConnection")
+@MainActor
 struct HubConnectionTests {
 
     private func makeConnection(
@@ -35,7 +36,7 @@ struct HubConnectionTests {
         try await conn.login(email: "user@test.com", password: "pass")
         #expect(conn.state == .connected)
         let url = await mockWS.connectedURL
-        #expect(url?.path == "/ws/device")
+        #expect(url?.path == "/ws/client")
         #expect(url?.query?.contains("token=mock-jwt") == true)
     }
 

@@ -4,6 +4,7 @@ import CCModels
 import CCNetworking
 
 /// Canonical app state. Owns the hub connection and holds all sessions/machines.
+@MainActor
 @Observable
 public final class AppState {
     public let connection: HubConnection
@@ -14,7 +15,7 @@ public final class AppState {
     public var sessionStreams: [String: SessionStream] = [:]
 
     public var isAuthenticated: Bool {
-        connection.state == .connected
+        connection.state == .connected || connection.hasStoredCredentials
     }
 
     public var sortedSessions: [SessionMeta] {
@@ -43,9 +44,13 @@ public final class AppState {
         self.connection = connection
     }
 
-    /// Start listening for incoming messages. Call once on app launch after auth.
+    private var listeningTask: Task<Void, Never>?
+
+    /// Start listening for incoming messages. Safe to call multiple times --
+    /// previous listener is cancelled.
     public func startListening() {
-        Task { @MainActor in
+        listeningTask?.cancel()
+        listeningTask = Task { @MainActor in
             let stream = connection.incomingMessages()
             do {
                 for try await message in stream {
@@ -79,7 +84,6 @@ public final class AppState {
 
     // MARK: - Message dispatch
 
-    @MainActor
     public func handleMessage(_ message: ServerMessage) {
         switch message {
         case .sessionList(let list):

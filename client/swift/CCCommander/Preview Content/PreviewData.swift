@@ -56,7 +56,7 @@ enum PreviewData {
         .toolCall(id: "e7", toolName: "Bash", display: "Running swift test", result: "Test run with 22 tests passed", collapsed: false),
     ]
 
-    static func makePreviewAppState() -> AppState {
+    @MainActor static func makePreviewAppState() -> AppState {
         let keychain = MockKeychainStore()
         let mockWS = MockWebSocketClient()
         let mockAuth = MockAuthClient()

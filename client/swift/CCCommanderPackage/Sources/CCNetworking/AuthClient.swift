@@ -29,15 +29,15 @@ public struct AuthClient: AuthClientProtocol {
     }
 
     public func login(email: String, password: String) async throws -> TokenPair {
-        try await post(path: "/auth/login", body: AuthRequest(email: email, password: password))
+        try await post(path: "/api/auth/login", body: AuthRequest(email: email, password: password))
     }
 
     public func register(email: String, password: String) async throws -> TokenPair {
-        try await post(path: "/auth/register", body: AuthRequest(email: email, password: password))
+        try await post(path: "/api/auth/register", body: AuthRequest(email: email, password: password))
     }
 
     public func refresh(refreshToken: String) async throws -> TokenPair {
-        try await post(path: "/auth/refresh", body: RefreshRequest(refreshToken: refreshToken))
+        try await post(path: "/api/auth/refresh", body: RefreshRequest(refreshToken: refreshToken))
     }
 
     private func post<T: Encodable>(path: String, body: T) async throws -> TokenPair {
@@ -53,7 +53,7 @@ public struct AuthClient: AuthClientProtocol {
         }
         guard http.statusCode == 200 else {
             let errorBody = try? JSONDecoder().decode(AuthErrorResponse.self, from: data)
-            throw AuthError.serverError(http.statusCode, errorBody?.message ?? "Unknown error")
+            throw AuthError.serverError(http.statusCode, errorBody?.error ?? "Unknown error")
         }
         return try JSONDecoder().decode(TokenPair.self, from: data)
     }
@@ -69,7 +69,7 @@ private struct RefreshRequest: Encodable {
 }
 
 private struct AuthErrorResponse: Decodable {
-    let message: String
+    let error: String
 }
 
 public enum AuthError: Error, Sendable, LocalizedError {

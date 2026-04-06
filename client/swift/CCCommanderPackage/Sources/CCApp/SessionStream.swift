@@ -22,6 +22,7 @@ public enum SessionEntry: Identifiable {
 }
 
 /// Per-session live state. Accumulates streaming events into a chronological log.
+@MainActor
 @Observable
 public final class SessionStream {
     public let sessionId: String

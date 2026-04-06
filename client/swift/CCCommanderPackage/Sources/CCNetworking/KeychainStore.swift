@@ -37,7 +37,9 @@ public struct KeychainStore: KeychainStoreProtocol {
     }
 
     public func save(key: String, value: String) throws {
-        guard let data = value.data(using: .utf8) else { return }
+        guard let data = value.data(using: .utf8) else {
+            throw KeychainError.encodingFailed
+        }
         // Delete existing first
         try? delete(key: key)
 
@@ -87,6 +89,7 @@ public enum KeychainError: Error, Sendable {
     case saveFailed(OSStatus)
     case loadFailed(OSStatus)
     case deleteFailed(OSStatus)
+    case encodingFailed
 }
 
 /// In-memory keychain for tests and previews.

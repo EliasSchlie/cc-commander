@@ -10,14 +10,22 @@ public enum HubConnectionState: Sendable, Equatable {
 
 /// Manages the authenticated WebSocket connection to the hub.
 /// Handles auth (via REST), WebSocket lifecycle, and reconnection.
+///
+/// All mutable state is isolated to @MainActor to prevent data races.
+@MainActor
 @Observable
-public final class HubConnection: @unchecked Sendable {
+public final class HubConnection {
     public private(set) var state: HubConnectionState = .disconnected
+
+    /// Whether the user has credentials stored (survives reconnect flicker).
+    public var hasStoredCredentials: Bool {
+        keychain.jwt != nil
+    }
 
     private let baseURL: URL
     private let authClient: any AuthClientProtocol
     private let keychain: any KeychainStoreProtocol
-    private let wsClientFactory: () -> any WebSocketClientProtocol
+    private let wsClientFactory: @Sendable () -> any WebSocketClientProtocol
 
     private var wsClient: (any WebSocketClientProtocol)?
     private var messageStreamTask: Task<Void, Never>?
@@ -26,14 +34,13 @@ public final class HubConnection: @unchecked Sendable {
     private var reconnectDelay: TimeInterval = 1.0
     private let maxReconnectDelay: TimeInterval = 30.0
 
-    // Continuation for the public message stream
     private var messageContinuation: AsyncThrowingStream<ServerMessage, Error>.Continuation?
 
     public init(
         baseURL: URL,
         authClient: any AuthClientProtocol,
         keychain: any KeychainStoreProtocol,
-        wsClientFactory: @escaping () -> any WebSocketClientProtocol
+        wsClientFactory: @escaping @Sendable () -> any WebSocketClientProtocol
     ) {
         self.baseURL = baseURL
         self.authClient = authClient
@@ -67,14 +74,16 @@ public final class HubConnection: @unchecked Sendable {
     }
 
     /// Try to connect using stored tokens (app launch).
+    /// Only attempts refresh if the WebSocket connection is rejected (auth error),
+    /// not on transient network failures.
     public func connectWithStoredTokens() async throws {
         guard let token = keychain.jwt else {
             throw HubConnectionError.noStoredTokens
         }
         do {
             try await connectWebSocket(token: token)
-        } catch {
-            // Token might be expired, try refresh
+        } catch let error as WebSocketError {
+            // Only refresh on auth rejection, not network errors
             guard let refresh = keychain.refreshToken else { throw error }
             let tokens = try await authClient.refresh(refreshToken: refresh)
             try keychain.saveTokens(jwt: tokens.token, refreshToken: tokens.refreshToken)
@@ -125,12 +134,16 @@ public final class HubConnection: @unchecked Sendable {
     // MARK: - Message stream
 
     /// The single stream of incoming messages from the hub.
-    /// AppState subscribes to this.
+    /// AppState subscribes to this. Only one subscriber at a time --
+    /// calling again terminates the previous stream.
     public func incomingMessages() -> AsyncThrowingStream<ServerMessage, Error> {
-        AsyncThrowingStream { continuation in
+        messageContinuation?.finish()
+        return AsyncThrowingStream { continuation in
             self.messageContinuation = continuation
             continuation.onTermination = { [weak self] _ in
-                self?.messageContinuation = nil
+                Task { @MainActor in
+                    self?.messageContinuation = nil
+                }
             }
         }
     }
@@ -153,15 +166,19 @@ public final class HubConnection: @unchecked Sendable {
         self.wsClient = ws
 
         // Build WSS URL
-        var components = URLComponents(url: baseURL, resolvingAgainstBaseURL: false)!
-        components.path = "/ws/device"
+        guard var components = URLComponents(url: baseURL, resolvingAgainstBaseURL: false) else {
+            throw HubConnectionError.invalidURL
+        }
+        components.path = "/ws/client"
         components.queryItems = [URLQueryItem(name: "token", value: token)]
         if components.scheme == "https" {
             components.scheme = "wss"
         } else {
             components.scheme = "ws"
         }
-        let wsURL = components.url!
+        guard let wsURL = components.url else {
+            throw HubConnectionError.invalidURL
+        }
 
         try await ws.connect(url: wsURL)
         state = .connected
@@ -173,12 +190,11 @@ public final class HubConnection: @unchecked Sendable {
             let stream = await ws.messages()
             do {
                 for try await msg in stream {
-                    self?.messageContinuation?.yield(msg)
+                    await self?.messageContinuation?.yield(msg)
                 }
-                // Stream ended normally
-                self?.handleDisconnect()
+                await self?.handleDisconnect()
             } catch {
-                self?.handleDisconnect()
+                await self?.handleDisconnect()
             }
         }
     }
@@ -198,20 +214,18 @@ public final class HubConnection: @unchecked Sendable {
             try? await Task.sleep(for: .seconds(delay))
             guard !Task.isCancelled, shouldReconnect else { return }
 
-            // Increase delay for next attempt
             reconnectDelay = min(reconnectDelay * 2, maxReconnectDelay)
 
-            // Try refresh + reconnect
             do {
-                if let refresh = keychain.refreshToken {
+                // Try stored JWT first; only refresh if that fails
+                if let token = keychain.jwt {
+                    try await connectWebSocket(token: token)
+                } else if let refresh = keychain.refreshToken {
                     let tokens = try await authClient.refresh(refreshToken: refresh)
                     try keychain.saveTokens(jwt: tokens.token, refreshToken: tokens.refreshToken)
                     try await connectWebSocket(token: tokens.token)
-                } else if let token = keychain.jwt {
-                    try await connectWebSocket(token: token)
                 }
             } catch {
-                // Retry
                 if shouldReconnect {
                     scheduleReconnect()
                 }
@@ -223,4 +237,5 @@ public final class HubConnection: @unchecked Sendable {
 public enum HubConnectionError: Error, Sendable {
     case notConnected
     case noStoredTokens
+    case invalidURL
 }

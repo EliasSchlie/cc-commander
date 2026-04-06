@@ -4,6 +4,7 @@ import Foundation
 @testable import CCModels
 
 @Suite("SessionStream")
+@MainActor
 struct SessionStreamTests {
 
     // Prevents: streaming text not accumulated, user sees nothing
