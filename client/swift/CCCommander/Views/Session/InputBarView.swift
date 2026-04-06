@@ -1,0 +1,45 @@
+import SwiftUI
+import CCApp
+
+struct InputBarView: View {
+    @Environment(AppState.self) private var appState
+    let isGenerating: Bool
+    @State private var text = ""
+    @FocusState private var isFocused: Bool
+
+    var body: some View {
+        HStack(spacing: 8) {
+            TextField("Send a message...", text: $text, axis: .vertical)
+                .textFieldStyle(.plain)
+                .lineLimit(1...5)
+                .focused($isFocused)
+                .disabled(isGenerating)
+                .onSubmit {
+                    // Only submit on Cmd+Return (plain Return adds newline in multiline)
+                }
+
+            Button {
+                send()
+            } label: {
+                Image(systemName: isGenerating ? "stop.fill" : "arrow.up.circle.fill")
+                    .font(.title2)
+            }
+            .buttonStyle(.borderless)
+            .disabled(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !isGenerating)
+            .keyboardShortcut(.return, modifiers: .command)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .onAppear { isFocused = true }
+    }
+
+    private func send() {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        let message = trimmed
+        text = ""
+        Task {
+            try? await appState.sendPrompt(prompt: message)
+        }
+    }
+}
