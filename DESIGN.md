@@ -16,6 +16,29 @@
 - No client ever talks directly to an agent
 - The hub is a single central server shared by all users (multi-tenant)
 
+## Repository Structure
+
+Monorepo with independent components. Each component has its own dependencies, build, and tests. They share no runtime code -- they communicate only over the network.
+
+```
+cc-commander/
+  SPEC.md                 # Product spec (source of truth)
+  DESIGN.md               # Technical design
+  hub/                    # Hub server (Node.js)
+  agent/                  # Machine agent (Node.js)
+  client/
+    SPEC.md               # Shared client spec
+    swift/                # iOS + macOS app (SwiftUI)
+    web/                  # Browser client (later)
+    cli/                  # CLI client (later)
+```
+
+Each component must:
+- Have its own package manifest (`package.json`, `Package.swift`, etc.)
+- Build independently
+- Have its own tests that run independently
+- Be deployable independently
+
 ## Components
 
 ### Agent (Node.js)
