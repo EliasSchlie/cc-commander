@@ -1,0 +1,506 @@
+import { WebSocketServer, WebSocket } from "ws";
+import { createServer, IncomingMessage, ServerResponse } from "node:http";
+import { URL } from "node:url";
+import { randomUUID } from "node:crypto";
+import {
+  parseClientMessage,
+  parseAgentMessage,
+  serialize,
+} from "./protocol.ts";
+import type {
+  ClientToHubMsg,
+  AgentToHubMsg,
+  HubToAgentMsg,
+  HubToClientMsg,
+  RespondToPromptMsg,
+} from "./protocol.ts";
+import type { HubDb } from "./db.ts";
+import type { AuthService, JwtPayload } from "./auth.ts";
+import { DuplicateEmailError } from "./auth.ts";
+
+interface ClientConnection {
+  ws: WebSocket;
+  accountId: string;
+  email: string;
+}
+
+interface AgentConnection {
+  ws: WebSocket;
+  machineId: string;
+  accountId: string;
+  machineName: string;
+}
+
+export interface HubConfig {
+  port: number;
+  db: HubDb;
+  auth: AuthService;
+}
+
+export class Hub {
+  config: HubConfig;
+  clients: Map<string, ClientConnection>;
+  agents: Map<string, AgentConnection>;
+  /** Maps requestId -> ClientConnection for pending history requests */
+  pendingHistoryRequests: Map<string, ClientConnection>;
+  httpServer: ReturnType<typeof createServer>;
+  wss: WebSocketServer;
+
+  constructor(config: HubConfig) {
+    this.config = config;
+    this.clients = new Map();
+    this.agents = new Map();
+    this.pendingHistoryRequests = new Map();
+
+    this.httpServer = createServer((req, res) => this.handleHttp(req, res));
+    this.wss = new WebSocketServer({ server: this.httpServer });
+    this.wss.on("connection", (ws, req) => this.handleConnection(ws, req));
+  }
+
+  start(): Promise<void> {
+    return new Promise((resolve) => {
+      this.httpServer.listen(this.config.port, () => resolve());
+    });
+  }
+
+  stop(): Promise<void> {
+    return new Promise((resolve, reject) => {
+      for (const [, conn] of this.clients) conn.ws.close();
+      for (const [, conn] of this.agents) conn.ws.close();
+      this.wss.close(() => {
+        this.httpServer.close((err) => (err ? reject(err) : resolve()));
+      });
+    });
+  }
+
+  // ── REST API ──────────────────────────────────────────────────────────
+
+  private async handleHttp(
+    req: IncomingMessage,
+    res: ServerResponse,
+  ): Promise<void> {
+    const url = new URL(req.url || "/", `http://localhost:${this.config.port}`);
+
+    res.setHeader("Content-Type", "application/json");
+
+    if (req.method === "POST" && url.pathname === "/api/auth/register") {
+      return this.handleAuthEndpoint(req, res, "register");
+    }
+    if (req.method === "POST" && url.pathname === "/api/auth/login") {
+      return this.handleAuthEndpoint(req, res, "login");
+    }
+    if (req.method === "POST" && url.pathname === "/api/auth/refresh") {
+      return this.handleRefreshEndpoint(req, res);
+    }
+    if (req.method === "GET" && url.pathname === "/api/health") {
+      res.writeHead(200);
+      res.end(JSON.stringify({ status: "ok" }));
+      return;
+    }
+
+    res.writeHead(404);
+    res.end(JSON.stringify({ error: "Not found" }));
+  }
+
+  private async handleAuthEndpoint(
+    req: IncomingMessage,
+    res: ServerResponse,
+    action: "register" | "login",
+  ): Promise<void> {
+    try {
+      const body = await readBody(req);
+      const { email, password } = body;
+      if (!email || !password) {
+        res.writeHead(400);
+        res.end(JSON.stringify({ error: "email and password required" }));
+        return;
+      }
+      const tokens =
+        action === "register"
+          ? await this.config.auth.register(email, password)
+          : await this.config.auth.login(email, password);
+      res.writeHead(200);
+      res.end(JSON.stringify(tokens));
+    } catch (err) {
+      const isConflict =
+        action === "register" && err instanceof DuplicateEmailError;
+      res.writeHead(isConflict ? 409 : 401);
+      res.end(JSON.stringify({ error: (err as Error).message }));
+    }
+  }
+
+  private async handleRefreshEndpoint(
+    req: IncomingMessage,
+    res: ServerResponse,
+  ): Promise<void> {
+    try {
+      const body = await readBody(req);
+      if (!body.refreshToken) {
+        res.writeHead(400);
+        res.end(JSON.stringify({ error: "refreshToken required" }));
+        return;
+      }
+      const tokens = await this.config.auth.refresh(body.refreshToken);
+      res.writeHead(200);
+      res.end(JSON.stringify(tokens));
+    } catch (err) {
+      res.writeHead(401);
+      res.end(JSON.stringify({ error: (err as Error).message }));
+    }
+  }
+
+  // ── WebSocket ─────────────────────────────────────────────────────────
+
+  private handleConnection(ws: WebSocket, req: IncomingMessage): void {
+    const url = new URL(req.url || "/", `http://localhost:${this.config.port}`);
+
+    if (url.pathname === "/ws/client") {
+      this.handleClientConnection(ws, url);
+    } else if (url.pathname === "/ws/agent") {
+      this.handleAgentConnection(ws, url);
+    } else {
+      ws.close(4000, "Unknown endpoint");
+    }
+  }
+
+  // ── Client connections ────────────────────────────────────────────────
+
+  private handleClientConnection(ws: WebSocket, url: URL): void {
+    const token = url.searchParams.get("token");
+    if (!token) {
+      ws.close(4001, "Missing token");
+      return;
+    }
+
+    let payload: JwtPayload;
+    try {
+      payload = this.config.auth.verifyToken(token);
+    } catch {
+      ws.close(4001, "Invalid token");
+      return;
+    }
+
+    const connectionId = randomUUID();
+    const conn: ClientConnection = {
+      ws,
+      accountId: payload.accountId,
+      email: payload.email,
+    };
+    this.clients.set(connectionId, conn);
+
+    this.handleListSessions(conn);
+    this.handleListMachines(conn);
+
+    ws.on("message", (data) => {
+      try {
+        const msg = parseClientMessage(data.toString());
+        this.handleClientMessage(conn, msg);
+      } catch (err) {
+        this.sendToClient(conn, {
+          type: "error",
+          message: err instanceof Error ? err.message : "Unknown error",
+        });
+      }
+    });
+
+    ws.on("close", () => {
+      this.clients.delete(connectionId);
+    });
+  }
+
+  private handleClientMessage(
+    conn: ClientConnection,
+    msg: ClientToHubMsg,
+  ): void {
+    switch (msg.type) {
+      case "list_sessions":
+        this.handleListSessions(conn);
+        break;
+      case "list_machines":
+        this.handleListMachines(conn);
+        break;
+      case "start_session":
+        this.handleStartSession(conn, msg);
+        break;
+      case "send_prompt":
+        this.handleSendPrompt(conn, msg);
+        break;
+      case "respond_to_prompt":
+        this.handleRespondToPrompt(conn, msg);
+        break;
+      case "get_session_history":
+        this.handleGetSessionHistory(conn, msg);
+        break;
+    }
+  }
+
+  private handleListSessions(conn: ClientConnection): void {
+    const sessions = this.config.db.listSessionsForAccount(conn.accountId);
+    this.sendToClient(conn, { type: "session_list", sessions });
+  }
+
+  private handleListMachines(conn: ClientConnection): void {
+    this.sendToClient(conn, {
+      type: "machine_list",
+      machines: this.enrichedMachineList(conn.accountId),
+    });
+  }
+
+  private handleStartSession(
+    conn: ClientConnection,
+    msg: { machineId: string; directory: string; prompt: string },
+  ): void {
+    const agentConn = this.agents.get(msg.machineId);
+    if (!agentConn) {
+      this.sendToClient(conn, { type: "error", message: "Machine is offline" });
+      return;
+    }
+    if (agentConn.accountId !== conn.accountId) {
+      this.sendToClient(conn, { type: "error", message: "Machine not found" });
+      return;
+    }
+
+    const session = this.config.db.createSession(
+      conn.accountId,
+      msg.machineId,
+      msg.directory,
+      "running",
+    );
+
+    this.sendToAgent(agentConn, {
+      type: "hub_start_session",
+      sessionId: session.id,
+      directory: msg.directory,
+      prompt: msg.prompt,
+    });
+
+    this.broadcastSessionList(conn.accountId);
+  }
+
+  private handleSendPrompt(
+    conn: ClientConnection,
+    msg: { sessionId: string; prompt: string },
+  ): void {
+    const result = this.resolveSessionAgent(conn, msg.sessionId);
+    if (!result) return;
+    this.config.db.updateSessionStatus(result.session.id, "running");
+    this.sendToAgent(result.agentConn, {
+      type: "hub_send_prompt",
+      sessionId: msg.sessionId,
+      prompt: msg.prompt,
+    });
+  }
+
+  private handleRespondToPrompt(
+    conn: ClientConnection,
+    msg: RespondToPromptMsg,
+  ): void {
+    const result = this.resolveSessionAgent(conn, msg.sessionId);
+    if (!result) return;
+    this.sendToAgent(result.agentConn, {
+      type: "hub_respond_to_prompt",
+      sessionId: msg.sessionId,
+      promptId: msg.promptId,
+      response: msg.response,
+    });
+  }
+
+  private handleGetSessionHistory(
+    conn: ClientConnection,
+    msg: { sessionId: string },
+  ): void {
+    const result = this.resolveSessionAgent(conn, msg.sessionId);
+    if (!result) return;
+    const requestId = randomUUID();
+    this.pendingHistoryRequests.set(requestId, conn);
+    this.sendToAgent(result.agentConn, {
+      type: "hub_get_history",
+      sessionId: msg.sessionId,
+      requestId,
+    });
+  }
+
+  /** Look up session + verify ownership + find online agent. Sends error to client and returns null on failure. */
+  private resolveSessionAgent(
+    conn: ClientConnection,
+    sessionId: string,
+  ): {
+    session: import("./db.ts").SessionRow;
+    agentConn: AgentConnection;
+  } | null {
+    const session = this.config.db.getSessionById(sessionId);
+    if (!session || session.accountId !== conn.accountId) {
+      this.sendToClient(conn, { type: "error", message: "Session not found" });
+      return null;
+    }
+    const agentConn = this.agents.get(session.machineId);
+    if (!agentConn) {
+      this.sendToClient(conn, { type: "error", message: "Machine is offline" });
+      return null;
+    }
+    return { session, agentConn };
+  }
+
+  // ── Agent connections ─────────────────────────────────────────────────
+
+  private handleAgentConnection(ws: WebSocket, url: URL): void {
+    const token = url.searchParams.get("token");
+    if (!token) {
+      ws.close(4001, "Missing registration token");
+      return;
+    }
+    const machine = this.config.db.getMachineByToken(token);
+    if (!machine) {
+      ws.close(4001, "Invalid registration token");
+      return;
+    }
+
+    const existing = this.agents.get(machine.id);
+    if (existing) {
+      existing.ws.close(4002, "Replaced by new connection");
+    }
+
+    const conn: AgentConnection = {
+      ws,
+      machineId: machine.id,
+      accountId: machine.accountId,
+      machineName: machine.name,
+    };
+    this.agents.set(machine.id, conn);
+    this.config.db.updateMachineLastSeen(machine.id);
+    this.broadcastMachineList(machine.accountId);
+
+    ws.on("message", (data) => {
+      try {
+        const msg = parseAgentMessage(data.toString());
+        this.handleAgentMessage(conn, msg);
+      } catch (err) {
+        console.error("Invalid agent message:", err);
+      }
+    });
+
+    ws.on("close", () => {
+      if (this.agents.get(machine.id)?.ws === ws) {
+        this.agents.delete(machine.id);
+        this.broadcastMachineList(machine.accountId);
+      }
+    });
+  }
+
+  private handleAgentMessage(conn: AgentConnection, msg: AgentToHubMsg): void {
+    switch (msg.type) {
+      case "agent_hello":
+        conn.machineName = msg.machineName;
+        break;
+
+      case "stream_text":
+      case "tool_call":
+      case "tool_result":
+      case "user_prompt":
+        this.relayToClients(conn.accountId, msg);
+        break;
+
+      case "session_history": {
+        const requestingClient = this.pendingHistoryRequests.get(msg.requestId);
+        this.pendingHistoryRequests.delete(msg.requestId);
+        if (requestingClient) {
+          this.sendToClient(requestingClient, msg);
+        } else {
+          this.relayToClients(conn.accountId, msg);
+        }
+        break;
+      }
+
+      case "session_status":
+        this.config.db.updateSessionStatus(
+          msg.sessionId,
+          msg.status,
+          msg.lastMessagePreview,
+        );
+        this.relayToClients(conn.accountId, msg);
+        break;
+
+      case "session_done":
+        this.config.db.updateSessionStatus(msg.sessionId, "idle");
+        if (msg.sdkSessionId) {
+          this.config.db.updateSessionSdkId(msg.sessionId, msg.sdkSessionId);
+        }
+        this.relayToClients(conn.accountId, msg);
+        this.broadcastSessionList(conn.accountId);
+        break;
+
+      case "session_error":
+        this.config.db.updateSessionStatus(msg.sessionId, "error", msg.error);
+        this.relayToClients(conn.accountId, msg);
+        this.broadcastSessionList(conn.accountId);
+        break;
+    }
+  }
+
+  // ── Helpers ───────────────────────────────────────────────────────────
+
+  private sendToClient(conn: ClientConnection, msg: HubToClientMsg): void {
+    if (conn.ws.readyState === WebSocket.OPEN) {
+      conn.ws.send(serialize(msg));
+    }
+  }
+
+  private sendToAgent(conn: AgentConnection, msg: HubToAgentMsg): void {
+    if (conn.ws.readyState === WebSocket.OPEN) {
+      conn.ws.send(serialize(msg));
+    }
+  }
+
+  private relayToClients(accountId: string, msg: HubToClientMsg): void {
+    for (const [, conn] of this.clients) {
+      if (conn.accountId === accountId) {
+        this.sendToClient(conn, msg);
+      }
+    }
+  }
+
+  private broadcastSessionList(accountId: string): void {
+    const sessions = this.config.db.listSessionsForAccount(accountId);
+    this.relayToClients(accountId, { type: "session_list", sessions });
+  }
+
+  private broadcastMachineList(accountId: string): void {
+    this.relayToClients(accountId, {
+      type: "machine_list",
+      machines: this.enrichedMachineList(accountId),
+    });
+  }
+
+  private enrichedMachineList(
+    accountId: string,
+  ): import("./protocol.ts").MachineInfo[] {
+    const machines = this.config.db.listMachinesForAccount(accountId);
+    for (const m of machines) m.online = this.agents.has(m.machineId);
+    return machines;
+  }
+}
+
+const MAX_BODY_BYTES = 1024 * 1024; // 1MB
+
+function readBody(req: IncomingMessage): Promise<any> {
+  return new Promise((resolve, reject) => {
+    let data = "";
+    let size = 0;
+    req.on("data", (chunk: string | Buffer) => {
+      size += typeof chunk === "string" ? chunk.length : chunk.byteLength;
+      if (size > MAX_BODY_BYTES) {
+        req.destroy();
+        reject(new Error("Request body too large"));
+        return;
+      }
+      data += chunk;
+    });
+    req.on("end", () => {
+      try {
+        resolve(JSON.parse(data));
+      } catch {
+        reject(new Error("Invalid JSON body"));
+      }
+    });
+  });
+}
