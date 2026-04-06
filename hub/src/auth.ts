@@ -2,6 +2,13 @@ import bcrypt from "bcrypt";
 import jwt from "jsonwebtoken";
 import type { HubDb } from "./db.ts";
 
+export class DuplicateEmailError extends Error {
+  constructor() {
+    super("Email already registered");
+    this.name = "DuplicateEmailError";
+  }
+}
+
 const SALT_ROUNDS = 10;
 const JWT_EXPIRY = "15m";
 const REFRESH_EXPIRY_DAYS = 30;
@@ -28,7 +35,7 @@ export class AuthService {
   async register(email: string, password: string): Promise<TokenPair> {
     const existing = this.db.getAccountByEmail(email);
     if (existing) {
-      throw new Error("Email already registered");
+      throw new DuplicateEmailError();
     }
     const hash = await bcrypt.hash(password, SALT_ROUNDS);
     const account = this.db.createAccount(email, hash);

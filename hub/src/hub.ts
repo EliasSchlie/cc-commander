@@ -16,6 +16,7 @@ import type {
 } from "./protocol.ts";
 import type { HubDb } from "./db.ts";
 import type { AuthService, JwtPayload } from "./auth.ts";
+import { DuplicateEmailError } from "./auth.ts";
 
 interface ClientConnection {
   ws: WebSocket;
@@ -118,10 +119,9 @@ export class Hub {
       res.writeHead(200);
       res.end(JSON.stringify(tokens));
     } catch (err) {
-      const status = (err as Error).message.includes("already registered")
-        ? 409
-        : 401;
-      res.writeHead(status);
+      const isConflict =
+        action === "register" && err instanceof DuplicateEmailError;
+      res.writeHead(isConflict ? 409 : 401);
       res.end(JSON.stringify({ error: (err as Error).message }));
     }
   }
@@ -237,11 +237,10 @@ export class Hub {
   }
 
   private handleListMachines(conn: ClientConnection): void {
-    const machines = this.config.db.listMachinesForAccount(conn.accountId);
-    for (const m of machines) {
-      m.online = this.agents.has(m.machineId);
-    }
-    this.sendToClient(conn, { type: "machine_list", machines });
+    this.sendToClient(conn, {
+      type: "machine_list",
+      machines: this.enrichedMachineList(conn.accountId),
+    });
   }
 
   private handleStartSession(
@@ -279,18 +278,10 @@ export class Hub {
     conn: ClientConnection,
     msg: { sessionId: string; prompt: string },
   ): void {
-    const session = this.config.db.getSessionById(msg.sessionId);
-    if (!session || session.accountId !== conn.accountId) {
-      this.sendToClient(conn, { type: "error", message: "Session not found" });
-      return;
-    }
-    const agentConn = this.agents.get(session.machineId);
-    if (!agentConn) {
-      this.sendToClient(conn, { type: "error", message: "Machine is offline" });
-      return;
-    }
-    this.config.db.updateSessionStatus(session.id, "running");
-    this.sendToAgent(agentConn, {
+    const result = this.resolveSessionAgent(conn, msg.sessionId);
+    if (!result) return;
+    this.config.db.updateSessionStatus(result.session.id, "running");
+    this.sendToAgent(result.agentConn, {
       type: "hub_send_prompt",
       sessionId: msg.sessionId,
       prompt: msg.prompt,
@@ -301,17 +292,9 @@ export class Hub {
     conn: ClientConnection,
     msg: RespondToPromptMsg,
   ): void {
-    const session = this.config.db.getSessionById(msg.sessionId);
-    if (!session || session.accountId !== conn.accountId) {
-      this.sendToClient(conn, { type: "error", message: "Session not found" });
-      return;
-    }
-    const agentConn = this.agents.get(session.machineId);
-    if (!agentConn) {
-      this.sendToClient(conn, { type: "error", message: "Machine is offline" });
-      return;
-    }
-    this.sendToAgent(agentConn, {
+    const result = this.resolveSessionAgent(conn, msg.sessionId);
+    if (!result) return;
+    this.sendToAgent(result.agentConn, {
       type: "hub_respond_to_prompt",
       sessionId: msg.sessionId,
       promptId: msg.promptId,
@@ -323,22 +306,35 @@ export class Hub {
     conn: ClientConnection,
     msg: { sessionId: string },
   ): void {
-    const session = this.config.db.getSessionById(msg.sessionId);
-    if (!session || session.accountId !== conn.accountId) {
-      this.sendToClient(conn, { type: "error", message: "Session not found" });
-      return;
-    }
-    const agentConn = this.agents.get(session.machineId);
-    if (!agentConn) {
-      this.sendToClient(conn, { type: "error", message: "Machine is offline" });
-      return;
-    }
+    const result = this.resolveSessionAgent(conn, msg.sessionId);
+    if (!result) return;
     const requestId = randomUUID();
-    this.sendToAgent(agentConn, {
+    this.sendToAgent(result.agentConn, {
       type: "hub_get_history",
       sessionId: msg.sessionId,
       requestId,
     });
+  }
+
+  /** Look up session + verify ownership + find online agent. Sends error to client and returns null on failure. */
+  private resolveSessionAgent(
+    conn: ClientConnection,
+    sessionId: string,
+  ): {
+    session: import("./db.ts").SessionRow;
+    agentConn: AgentConnection;
+  } | null {
+    const session = this.config.db.getSessionById(sessionId);
+    if (!session || session.accountId !== conn.accountId) {
+      this.sendToClient(conn, { type: "error", message: "Session not found" });
+      return null;
+    }
+    const agentConn = this.agents.get(session.machineId);
+    if (!agentConn) {
+      this.sendToClient(conn, { type: "error", message: "Machine is offline" });
+      return null;
+    }
+    return { session, agentConn };
   }
 
   // ── Agent connections ─────────────────────────────────────────────────
@@ -455,18 +451,36 @@ export class Hub {
   }
 
   private broadcastMachineList(accountId: string): void {
+    this.relayToClients(accountId, {
+      type: "machine_list",
+      machines: this.enrichedMachineList(accountId),
+    });
+  }
+
+  private enrichedMachineList(
+    accountId: string,
+  ): import("./protocol.ts").MachineInfo[] {
     const machines = this.config.db.listMachinesForAccount(accountId);
-    for (const m of machines) {
-      m.online = this.agents.has(m.machineId);
-    }
-    this.relayToClients(accountId, { type: "machine_list", machines });
+    for (const m of machines) m.online = this.agents.has(m.machineId);
+    return machines;
   }
 }
+
+const MAX_BODY_BYTES = 1024 * 1024; // 1MB
 
 function readBody(req: IncomingMessage): Promise<any> {
   return new Promise((resolve, reject) => {
     let data = "";
-    req.on("data", (chunk) => (data += chunk));
+    let size = 0;
+    req.on("data", (chunk: string | Buffer) => {
+      size += typeof chunk === "string" ? chunk.length : chunk.byteLength;
+      if (size > MAX_BODY_BYTES) {
+        req.destroy();
+        reject(new Error("Request body too large"));
+        return;
+      }
+      data += chunk;
+    });
     req.on("end", () => {
       try {
         resolve(JSON.parse(data));

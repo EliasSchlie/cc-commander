@@ -8,6 +8,7 @@ import type {
 } from "./protocol.ts";
 
 const ASK_USER_TOOL = "AskUserQuestion";
+const MAX_SDK_SESSION_IDS = 1000;
 
 interface ActiveSession {
   sessionId: string;
@@ -32,7 +33,6 @@ export class MachineAgent {
   config: AgentConfig;
   ws: WebSocket | null;
   sessions: Map<string, ActiveSession>;
-  /** Maps sessionId -> sdkSessionId for completed sessions (survives session cleanup) */
   sdkSessionIds: Map<string, string>;
   shouldReconnect: boolean;
   reconnectTimer: ReturnType<typeof setTimeout> | null;
@@ -133,6 +133,14 @@ export class MachineAgent {
     }
   }
 
+  private resolveSdkSessionId(sessionId: string): string | undefined {
+    return (
+      this.sessions.get(sessionId)?.sdkSessionId ||
+      this.sdkSessionIds.get(sessionId) ||
+      undefined
+    );
+  }
+
   // ── Session runner ────────────────────────────────────────────────────
 
   private async runSession(
@@ -146,11 +154,7 @@ export class MachineAgent {
     const abortController = new AbortController();
     const session: ActiveSession = {
       sessionId,
-      sdkSessionId:
-        extra.resume ||
-        existing?.sdkSessionId ||
-        this.sdkSessionIds.get(sessionId) ||
-        null,
+      sdkSessionId: extra.resume || this.resolveSdkSessionId(sessionId) || null,
       abortController,
       pendingPrompts: new Map(),
     };
@@ -173,7 +177,6 @@ export class MachineAgent {
         ) => {
           return this.handleCanUseTool(
             session,
-            sessionId,
             `${sessionId}-${++promptCounter}`,
             toolName,
             input,
@@ -185,7 +188,7 @@ export class MachineAgent {
       if (extra.resume) options.resume = extra.resume;
 
       for await (const msg of this.queryFn({ prompt, options })) {
-        this.processStreamMessage(msg, session, sessionId);
+        this.processStreamMessage(msg, session);
       }
     } catch (err) {
       if (!abortController.signal.aborted) {
@@ -197,6 +200,11 @@ export class MachineAgent {
       }
     } finally {
       if (session.sdkSessionId) {
+        // Evict oldest entry if at capacity
+        if (this.sdkSessionIds.size >= MAX_SDK_SESSION_IDS) {
+          const oldest = this.sdkSessionIds.keys().next().value;
+          if (oldest !== undefined) this.sdkSessionIds.delete(oldest);
+        }
         this.sdkSessionIds.set(sessionId, session.sdkSessionId);
       }
       this.sessions.delete(sessionId);
@@ -204,9 +212,7 @@ export class MachineAgent {
   }
 
   private handleSendPrompt(sessionId: string, prompt: string): void {
-    const sdkSessionId =
-      this.sessions.get(sessionId)?.sdkSessionId ||
-      this.sdkSessionIds.get(sessionId);
+    const sdkSessionId = this.resolveSdkSessionId(sessionId);
     this.runSession(
       sessionId,
       prompt,
@@ -218,7 +224,6 @@ export class MachineAgent {
 
   private async handleCanUseTool(
     session: ActiveSession,
-    sessionId: string,
     promptId: string,
     toolName: string,
     input: Record<string, unknown>,
@@ -227,6 +232,8 @@ export class MachineAgent {
     | { behavior: "allow"; updatedInput?: Record<string, unknown> }
     | { behavior: "deny"; message: string }
   > {
+    const { sessionId } = session;
+
     if (toolName === ASK_USER_TOOL) {
       const questions = (input as any).questions || [];
       this.sendToHub({
@@ -295,11 +302,8 @@ export class MachineAgent {
 
   // ── Stream message processing ─────────────────────────────────────────
 
-  private processStreamMessage(
-    msg: any,
-    session: ActiveSession,
-    sessionId: string,
-  ): void {
+  private processStreamMessage(msg: any, session: ActiveSession): void {
+    const { sessionId } = session;
     switch (msg.type) {
       case "stream_event": {
         const e = msg.event;
@@ -374,11 +378,7 @@ export class MachineAgent {
     sessionId: string,
     requestId: string,
   ): Promise<void> {
-    // Check active sessions first, then the persistent sdkSessionIds map
-    const sdkSessionId =
-      this.sessions.get(sessionId)?.sdkSessionId ||
-      this.sdkSessionIds.get(sessionId);
-
+    const sdkSessionId = this.resolveSdkSessionId(sessionId);
     if (!sdkSessionId) {
       this.sendToHub({
         type: "session_history",
