@@ -1,0 +1,15 @@
+{
+  "name": "cc-commander",
+  "private": true,
+  "workspaces": [
+    "packages/shared",
+    "packages/hub",
+    "packages/agent"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces",
+    "test": "node --experimental-strip-types --test 'packages/shared/src/**/*.test.ts' 'packages/hub/src/**/*.test.ts' 'packages/agent/src/**/*.test.ts'",
+    "typecheck": "npx tsc -p packages/shared/tsconfig.check.json && npx tsc -p packages/hub/tsconfig.check.json && npx tsc -p packages/agent/tsconfig.check.json",
+    "clean": "npm run clean --workspaces --if-present"
+  }
+}
