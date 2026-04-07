@@ -722,6 +722,186 @@ describe("pending history cleanup", () => {
   });
 });
 
+// ── Metrics integration ───────────────────────────────────────────────
+//
+// Verifies the four hub-side counter sites land in the Metrics snapshot
+// with the expected labels. The Metrics class itself is unit-tested in
+// the protocol package.
+describe("metrics counters", () => {
+  // Prevents: a misbehaving client crashing the parser without anyone
+  // noticing the rate at which it happens.
+  it("counts hub.parse_reject for malformed client messages", async () => {
+    const tokens = await auth.register("user@test.com", "pass");
+    const clientWs = await connectClient(tokens.token);
+    await new Promise((r) => setTimeout(r, 50));
+
+    clientWs.send("not json");
+    await new Promise((r) => setTimeout(r, 50));
+
+    const snap = hub.metrics.snapshot();
+    assert.equal(snap["hub.parse_reject{source=client}"], 1);
+
+    await closeWs(clientWs);
+  });
+
+  it("counts hub.parse_reject for malformed runner messages", async () => {
+    const tokens = await auth.register("user@test.com", "pass");
+    const account = db.getAccountByEmail("user@test.com")!;
+    const machine = db.createMachine(account.id, "m");
+    const runnerWs = await connectRunner(machine.registrationToken);
+    void tokens;
+    await new Promise((r) => setTimeout(r, 50));
+
+    runnerWs.send("not json");
+    await new Promise((r) => setTimeout(r, 50));
+
+    const snap = hub.metrics.snapshot();
+    assert.equal(snap["hub.parse_reject{source=runner}"], 1);
+
+    await closeWs(runnerWs);
+  });
+
+  it("counts hub.history_ttl_expired when the TTL fires", async () => {
+    await hub.stop();
+    db.close();
+    db = new HubDb(":memory:");
+    auth = new AuthService(db, JWT_SECRET);
+    hub = new Hub({ port: 0, db, auth, historyRequestTtlMs: 50 });
+    await hub.start();
+    const addr = hub.httpServer.address();
+    port = typeof addr === "object" && addr ? addr.port : 0;
+    baseUrl = `http://localhost:${port}`;
+
+    const tokens = await auth.register("u@test.com", "pw");
+    const account = db.getAccountByEmail("u@test.com")!;
+    const machine = db.createMachine(account.id, "m");
+    const session = db.createSession(account.id, machine.id, "/tmp", "idle");
+
+    const runnerWs = await connectRunner(machine.registrationToken);
+    const clientWs = await connectClient(tokens.token);
+    await new Promise((r) => setTimeout(r, 100));
+    runnerWs.on("message", () => {}); // swallow, force TTL
+
+    const replied = waitForMsg(clientWs, (m) => m.type === "session_history");
+    send(clientWs, { type: "get_session_history", sessionId: session.id });
+    await replied;
+
+    assert.equal(hub.metrics.snapshot()["hub.history_ttl_expired"], 1);
+
+    await closeWs(clientWs);
+    await closeWs(runnerWs);
+  });
+
+  // Both branches of orphan: unknown requestId and machineId mismatch.
+  it("counts hub.history_orphan_reply for unknown requestId", async () => {
+    const tokens = await auth.register("u@test.com", "pw");
+    const account = db.getAccountByEmail("u@test.com")!;
+    const machine = db.createMachine(account.id, "m");
+    const runnerWs = await connectRunner(machine.registrationToken);
+    void tokens;
+    await new Promise((r) => setTimeout(r, 50));
+
+    runnerWs.send(
+      JSON.stringify({
+        type: "session_history",
+        sessionId: "s1",
+        requestId: "never-pending",
+        messages: [],
+      }),
+    );
+    await new Promise((r) => setTimeout(r, 50));
+
+    assert.equal(hub.metrics.snapshot()["hub.history_orphan_reply"], 1);
+    await closeWs(runnerWs);
+  });
+
+  // A degraded reply (runner sets `error: fetch_failed` etc) is a
+  // distinct signal from an orphan reply -- operators want both rates.
+  // The closed-set label keeps cardinality bounded.
+  it("counts hub.history_degraded when reply carries an error code", async () => {
+    const tokens = await auth.register("u@test.com", "pw");
+    const account = db.getAccountByEmail("u@test.com")!;
+    const machine = db.createMachine(account.id, "m");
+    const session = db.createSession(account.id, machine.id, "/tmp", "idle");
+
+    const runnerWs = await connectRunner(machine.registrationToken);
+    const clientWs = await connectClient(tokens.token);
+    await new Promise((r) => setTimeout(r, 100));
+
+    // Capture the requestId the hub generated, then reply degraded.
+    const replyWhenAsked = new Promise<void>((resolve) => {
+      runnerWs.once("message", (data) => {
+        const msg = JSON.parse(data.toString());
+        runnerWs.send(
+          JSON.stringify({
+            type: "session_history",
+            sessionId: session.id,
+            requestId: msg.requestId,
+            messages: [],
+            error: "fetch_failed",
+          }),
+        );
+        resolve();
+      });
+    });
+
+    const clientGotReply = waitForMsg(
+      clientWs,
+      (m) => m.type === "session_history",
+    );
+    send(clientWs, { type: "get_session_history", sessionId: session.id });
+    await replyWhenAsked;
+    await clientGotReply;
+
+    const snap = hub.metrics.snapshot();
+    assert.equal(snap["hub.history_degraded{code=fetch_failed}"], 1);
+
+    await closeWs(clientWs);
+    await closeWs(runnerWs);
+  });
+
+  it("counts hub.dropped_tool_block with closed-set labels", async () => {
+    const tokens = await auth.register("u@test.com", "pw");
+    const account = db.getAccountByEmail("u@test.com")!;
+    const machine = db.createMachine(account.id, "m");
+    const runnerWs = await connectRunner(machine.registrationToken);
+    void tokens;
+    await new Promise((r) => setTimeout(r, 50));
+
+    runnerWs.send(
+      JSON.stringify({
+        type: "dropped_tool_block",
+        sessionId: "s1",
+        blockType: "tool_use",
+        reason: "missing_id",
+      }),
+    );
+    runnerWs.send(
+      JSON.stringify({
+        type: "dropped_tool_block",
+        sessionId: "s1",
+        blockType: "tool_result",
+        reason: "missing_tool_use_id",
+      }),
+    );
+    await new Promise((r) => setTimeout(r, 50));
+
+    const snap = hub.metrics.snapshot();
+    assert.equal(
+      snap["hub.dropped_tool_block{block_type=tool_use,reason=missing_id}"],
+      1,
+    );
+    assert.equal(
+      snap[
+        "hub.dropped_tool_block{block_type=tool_result,reason=missing_tool_use_id}"
+      ],
+      1,
+    );
+
+    await closeWs(runnerWs);
+  });
+});
+
 // ── Rate limiting ───────────────────────────────────────────────────────
 
 describe("rate limiting", () => {

@@ -14,6 +14,7 @@ import type {
   HubToClientMsg,
   RespondToPromptMsg,
 } from "@cc-commander/protocol";
+import { HUB_METRIC, Metrics } from "@cc-commander/protocol/metrics";
 import type { HubDb } from "./db.ts";
 import type { AuthService, JwtPayload } from "./auth.ts";
 import { DuplicateEmailError } from "./auth.ts";
@@ -62,6 +63,12 @@ export interface HubConfig {
     refresh?: { capacity: number; perMinute: number };
     machineCreate?: { capacity: number; perHour: number };
   };
+  /**
+   * Inject a Metrics instance (mostly for tests, which want a fast
+   * flush interval and a captured emit). Production callers leave this
+   * unset and get the default 60s flush to console.log.
+   */
+  metrics?: Metrics;
 }
 
 export class Hub {
@@ -83,6 +90,7 @@ export class Hub {
   registerLimiter: TokenBucketRateLimiter;
   refreshLimiter: TokenBucketRateLimiter;
   machineCreateLimiter: TokenBucketRateLimiter;
+  metrics: Metrics;
 
   constructor(config: HubConfig) {
     this.config = config;
@@ -124,6 +132,7 @@ export class Hub {
       capacity: machine.capacity,
       refillPerMs: machine.perHour / 3_600_000,
     });
+    this.metrics = config.metrics ?? new Metrics();
 
     this.httpServer = createServer((req, res) => this.handleHttp(req, res));
     this.wss = new WebSocketServer({ server: this.httpServer });
@@ -135,6 +144,7 @@ export class Hub {
     this.registerLimiter.startSweeping();
     this.refreshLimiter.startSweeping();
     this.machineCreateLimiter.startSweeping();
+    this.metrics.start();
     return new Promise((resolve) => {
       this.httpServer.listen(this.config.port, () => resolve());
     });
@@ -146,6 +156,7 @@ export class Hub {
       this.registerLimiter.stop();
       this.refreshLimiter.stop();
       this.machineCreateLimiter.stop();
+      this.metrics.stop();
       for (const [, conn] of this.clients) conn.ws.close();
       for (const [, conn] of this.runners) conn.ws.close();
       for (const [, entry] of this.pendingHistoryRequests) {
@@ -394,6 +405,7 @@ export class Hub {
         const msg = parseClientMessage(data.toString());
         this.handleClientMessage(conn, msg);
       } catch (err) {
+        this.metrics.inc(HUB_METRIC.PARSE_REJECT, { source: "client" });
         this.sendToClient(conn, {
           type: "error",
           message: err instanceof Error ? err.message : "Unknown error",
@@ -527,6 +539,7 @@ export class Hub {
       const pending = this.pendingHistoryRequests.get(requestId);
       if (!pending) return;
       this.pendingHistoryRequests.delete(requestId);
+      this.metrics.inc(HUB_METRIC.HISTORY_TTL_EXPIRED);
       console.warn(
         `[hub] session_history TTL expired for request ${requestId} on machine ${pending.machineId}`,
       );
@@ -606,6 +619,7 @@ export class Hub {
         const msg = parseRunnerMessage(data.toString());
         this.handleRunnerMessage(conn, msg);
       } catch (err) {
+        this.metrics.inc(HUB_METRIC.PARSE_REJECT, { source: "runner" });
         console.error("Invalid runner message:", err);
       }
     });
@@ -649,6 +663,7 @@ export class Hub {
           // Either expired (TTL fired) or fabricated by a misbehaving
           // runner. Either way: do not broadcast unsolicited history to
           // every client on the account.
+          this.metrics.inc(HUB_METRIC.HISTORY_ORPHAN_REPLY);
           console.warn(
             `[hub] dropping session_history with unknown requestId from machine ${conn.machineId}`,
           );
@@ -656,12 +671,19 @@ export class Hub {
         }
         if (pending.machineId !== conn.machineId) {
           // The runner that replied isn't the one we asked. Drop.
+          this.metrics.inc(HUB_METRIC.HISTORY_ORPHAN_REPLY);
           console.warn(
             `[hub] session_history reply machineId mismatch (expected ${pending.machineId}, got ${conn.machineId})`,
           );
           break;
         }
         this.deletePendingHistory(msg.requestId);
+        if (msg.error) {
+          // Operators want degraded-fetch rate as much as orphan rate.
+          // The error code is from A1's closed set, so cardinality is
+          // bounded by the union (timeout|no_session|fetch_failed).
+          this.metrics.inc(HUB_METRIC.HISTORY_DEGRADED, { code: msg.error });
+        }
         this.sendToClient(pending.conn, msg);
         break;
       }
@@ -692,8 +714,12 @@ export class Hub {
 
       case "dropped_tool_block":
         // Pure observability signal: SDK shape drift surfaced by the
-        // runner-side guards. Logged here so a single grep on the hub
-        // catches it across the fleet; #44 follow-up wires a counter.
+        // runner-side guards. The labels are closed-set thanks to A1's
+        // parser validation, so cardinality is bounded.
+        this.metrics.inc(HUB_METRIC.DROPPED_TOOL_BLOCK, {
+          block_type: msg.blockType,
+          reason: msg.reason,
+        });
         console.warn(
           `[hub] dropped_tool_block machine=${conn.machineId} session=${msg.sessionId} block=${msg.blockType} reason=${msg.reason}`,
         );
