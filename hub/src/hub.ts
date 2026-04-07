@@ -197,8 +197,9 @@ export class Hub {
       );
       this.broadcastMachineList(payload.accountId);
     } catch (err) {
+      console.error("[hub] createMachine failed:", err);
       res.writeHead(500);
-      res.end(JSON.stringify({ error: (err as Error).message }));
+      res.end(JSON.stringify({ error: "Internal error" }));
     }
   }
 
