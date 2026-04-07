@@ -41,8 +41,11 @@ export class Hub {
   config: HubConfig;
   clients: Map<string, ClientConnection>;
   runners: Map<string, RunnerConnection>;
-  /** Maps requestId -> ClientConnection for pending history requests */
-  pendingHistoryRequests: Map<string, ClientConnection>;
+  /** Maps requestId -> { client that asked, machineId the request was sent to } */
+  pendingHistoryRequests: Map<
+    string,
+    { conn: ClientConnection; machineId: string }
+  >;
   httpServer: ReturnType<typeof createServer>;
   wss: WebSocketServer;
 
@@ -156,20 +159,33 @@ export class Hub {
     req: IncomingMessage,
     res: ServerResponse,
   ): Promise<void> {
-    const payload = this.verifyBearer(req);
-    if (!payload) {
+    const token = extractBearerToken(req);
+    let payload: JwtPayload;
+    try {
+      if (!token) throw new Error("Unauthorized");
+      payload = this.config.auth.verifyToken(token);
+    } catch {
       res.writeHead(401);
       res.end(JSON.stringify({ error: "Unauthorized" }));
       return;
     }
+
+    let name: string;
     try {
       const body = await readBody(req);
-      const name = typeof body.name === "string" ? body.name.trim() : "";
-      if (!name) {
-        res.writeHead(400);
-        res.end(JSON.stringify({ error: "name required" }));
-        return;
-      }
+      name = typeof body.name === "string" ? body.name.trim() : "";
+    } catch (err) {
+      res.writeHead(400);
+      res.end(JSON.stringify({ error: (err as Error).message }));
+      return;
+    }
+    if (!name) {
+      res.writeHead(400);
+      res.end(JSON.stringify({ error: "name required" }));
+      return;
+    }
+
+    try {
       const machine = this.config.db.createMachine(payload.accountId, name);
       res.writeHead(201);
       res.end(
@@ -181,21 +197,21 @@ export class Hub {
       );
       this.broadcastMachineList(payload.accountId);
     } catch (err) {
-      res.writeHead(400);
+      res.writeHead(500);
       res.end(JSON.stringify({ error: (err as Error).message }));
     }
   }
 
-  /** Extracts and verifies a Bearer token from the Authorization header. */
-  private verifyBearer(req: IncomingMessage): JwtPayload | null {
-    const header = req.headers["authorization"];
-    if (typeof header !== "string" || !header.startsWith("Bearer ")) {
-      return null;
-    }
-    try {
-      return this.config.auth.verifyToken(header.slice("Bearer ".length));
-    } catch {
-      return null;
+  /** Removes pending history request entries matching the predicate. No-op when the map is empty. */
+  private dropPendingHistoryFor(
+    predicate: (entry: {
+      conn: ClientConnection;
+      machineId: string;
+    }) => boolean,
+  ): void {
+    if (this.pendingHistoryRequests.size === 0) return;
+    for (const [requestId, entry] of this.pendingHistoryRequests) {
+      if (predicate(entry)) this.pendingHistoryRequests.delete(requestId);
     }
   }
 
@@ -222,12 +238,7 @@ export class Hub {
   ): void {
     // Prefer Authorization header (no token in logs); fall back to query
     // string for browser clients which can't set headers on WebSocket.
-    const authHeader = req.headers["authorization"];
-    const headerToken =
-      typeof authHeader === "string" && authHeader.startsWith("Bearer ")
-        ? authHeader.slice("Bearer ".length)
-        : null;
-    const token = headerToken ?? url.searchParams.get("token");
+    const token = extractBearerToken(req) ?? url.searchParams.get("token");
     if (!token) {
       ws.close(4001, "Missing token");
       return;
@@ -266,12 +277,7 @@ export class Hub {
 
     ws.on("close", () => {
       this.clients.delete(connectionId);
-      // Cancel any pending history requests this client was waiting on
-      for (const [requestId, requestingConn] of this.pendingHistoryRequests) {
-        if (requestingConn === conn) {
-          this.pendingHistoryRequests.delete(requestId);
-        }
-      }
+      this.dropPendingHistoryFor((entry) => entry.conn === conn);
     });
   }
 
@@ -379,7 +385,10 @@ export class Hub {
     const result = this.resolveSessionRunner(conn, msg.sessionId);
     if (!result) return;
     const requestId = randomUUID();
-    this.pendingHistoryRequests.set(requestId, conn);
+    this.pendingHistoryRequests.set(requestId, {
+      conn,
+      machineId: result.runnerConn.machineId,
+    });
     this.sendToRunner(result.runnerConn, {
       type: "hub_get_history",
       sessionId: msg.sessionId,
@@ -453,6 +462,8 @@ export class Hub {
           machine.id,
           "Runner disconnected",
         );
+        // Reply will never come from a disconnected runner.
+        this.dropPendingHistoryFor((entry) => entry.machineId === machine.id);
         this.broadcastMachineList(machine.accountId);
         if (affected > 0) {
           this.broadcastSessionList(machine.accountId);
@@ -478,10 +489,10 @@ export class Hub {
         break;
 
       case "session_history": {
-        const requestingClient = this.pendingHistoryRequests.get(msg.requestId);
+        const pending = this.pendingHistoryRequests.get(msg.requestId);
         this.pendingHistoryRequests.delete(msg.requestId);
-        if (requestingClient) {
-          this.sendToClient(requestingClient, msg);
+        if (pending) {
+          this.sendToClient(pending.conn, msg);
         } else {
           this.relayToClients(conn.accountId, msg);
         }
@@ -555,6 +566,16 @@ export class Hub {
     for (const m of machines) m.online = this.runners.has(m.machineId);
     return machines;
   }
+}
+
+const BEARER_PREFIX = "Bearer ";
+
+function extractBearerToken(req: IncomingMessage): string | null {
+  const header = req.headers["authorization"];
+  if (typeof header !== "string" || !header.startsWith(BEARER_PREFIX)) {
+    return null;
+  }
+  return header.slice(BEARER_PREFIX.length);
 }
 
 const MAX_BODY_BYTES = 1024 * 1024; // 1MB

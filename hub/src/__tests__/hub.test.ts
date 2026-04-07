@@ -577,4 +577,30 @@ describe("pending history cleanup", () => {
 
     await closeWs(runnerWs);
   });
+
+  // Prevents: pending history entries leaking when the runner crashes mid-request
+  it("clears pending history requests when the runner disconnects", async () => {
+    const tokens = await auth.register("user@test.com", "pass");
+    const account = db.getAccountByEmail("user@test.com")!;
+    const machine = db.createMachine(account.id, "Test Machine");
+    const session = db.createSession(account.id, machine.id, "/tmp", "idle");
+
+    const runnerWs = await connectRunner(machine.registrationToken);
+    const clientWs = await connectClient(tokens.token);
+    await new Promise((r) => setTimeout(r, 100));
+
+    const runnerSawRequest = new Promise<any>((resolve) => {
+      runnerWs.once("message", (data) => resolve(JSON.parse(data.toString())));
+    });
+    send(clientWs, { type: "get_session_history", sessionId: session.id });
+    await runnerSawRequest;
+    assert.equal(hub.pendingHistoryRequests.size, 1);
+
+    // Runner drops before replying -- entry must be cleared.
+    await closeWs(runnerWs);
+    await new Promise((r) => setTimeout(r, 100));
+    assert.equal(hub.pendingHistoryRequests.size, 0);
+
+    await closeWs(clientWs);
+  });
 });
