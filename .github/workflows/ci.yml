@@ -31,47 +31,31 @@ jobs:
       - run: npm run typecheck
       - run: npm test
 
-  swift-test:
-    name: Swift package tests
-    # Xcode 16 (macos-15) is required for the swift-testing 'Testing' module.
+  swift:
+    name: Swift package + macOS app
+    # Xcode 16 (macos-15) is needed for:
+    #   - the swift-testing 'Testing' module used by the package tests
+    #   - the .xcodeproj objectVersion 77 the project was generated with
+    # The iOS app build is intentionally skipped in CI: macos-15 ships
+    # the iOS 18 SDK but no simulator runtime, and downloading one in CI
+    # is slow and flaky. Cross-platform code is exercised by `swift test`,
+    # and the iOS-specific code is a small set of SwiftUI #if os(iOS) blocks.
     runs-on: macos-15
-    defaults:
-      run:
-        working-directory: client/swift/CCCommanderPackage
     steps:
       - uses: actions/checkout@v4
+
       - name: Select Xcode 16
         run: sudo xcode-select -s /Applications/Xcode_16.app
-      - run: swift test
 
-  xcode-build:
-    name: Xcode app builds (iOS + macOS)
-    # macos-14 ships Xcode 15 with the iOS 17 runtime preinstalled.
-    # Our deployment targets are iOS 17 / macOS 14 so this matches.
-    runs-on: macos-14
-    defaults:
-      run:
-        working-directory: client/swift
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Show Xcode + SDKs
-        run: |
-          xcodebuild -version
-          xcodebuild -showsdks
+      - name: Run Swift package tests
+        working-directory: client/swift/CCCommanderPackage
+        run: swift test
 
       - name: Build macOS app
+        working-directory: client/swift
         run: |
           xcodebuild build \
             -project CCCommander.xcodeproj \
             -scheme CCCommander_macOS \
             -destination 'platform=macOS' \
-            -quiet
-
-      - name: Build iOS app
-        run: |
-          xcodebuild build \
-            -project CCCommander.xcodeproj \
-            -scheme CCCommander_iOS \
-            -destination 'generic/platform=iOS Simulator' \
             -quiet
