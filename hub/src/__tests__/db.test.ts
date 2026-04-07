@@ -102,6 +102,44 @@ describe("sessions", () => {
     const updated = db.getSessionById(session.id)!;
     assert.equal(updated.sdkSessionId, "sdk-uuid-123");
   });
+
+  // Prevents: sessions stuck in 'running' forever after the runner disconnects
+  it("marks non-idle sessions as errored for a machine", () => {
+    const running = db.createSession(accountId, machineId, "/a", "running");
+    const waiting = db.createSession(
+      accountId,
+      machineId,
+      "/b",
+      "waiting_for_input",
+    );
+    const idle = db.createSession(accountId, machineId, "/c", "idle");
+    const errored = db.createSession(accountId, machineId, "/d", "error");
+
+    const affected = db.markSessionsErrorForMachine(machineId, "Runner gone");
+    assert.equal(affected, 2);
+
+    assert.equal(db.getSessionById(running.id)!.status, "error");
+    assert.equal(
+      db.getSessionById(running.id)!.lastMessagePreview,
+      "Runner gone",
+    );
+    assert.equal(db.getSessionById(waiting.id)!.status, "error");
+    // idle and already-errored sessions are untouched
+    assert.equal(db.getSessionById(idle.id)!.status, "idle");
+    assert.equal(db.getSessionById(errored.id)!.status, "error");
+  });
+
+  // Prevents: marking sessions on one machine accidentally affecting another machine
+  it("only errors sessions on the specified machine", () => {
+    const otherMachine = db.createMachine(accountId, "Other").id;
+    const a = db.createSession(accountId, machineId, "/a", "running");
+    const b = db.createSession(accountId, otherMachine, "/b", "running");
+
+    db.markSessionsErrorForMachine(machineId, "gone");
+
+    assert.equal(db.getSessionById(a.id)!.status, "error");
+    assert.equal(db.getSessionById(b.id)!.status, "running");
+  });
 });
 
 describe("refresh tokens", () => {

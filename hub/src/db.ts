@@ -232,6 +232,20 @@ export class HubDb {
       .run(sdkSessionId, sessionId);
   }
 
+  /** Marks all non-idle sessions on a machine as errored. Returns the number affected. */
+  markSessionsErrorForMachine(machineId: string, errorMessage: string): number {
+    // Type anchor: rename a SessionStatus value and these will fail to compile.
+    const errorStatus: SessionStatus = "error";
+    const activeStatuses: SessionStatus[] = ["running", "waiting_for_input"];
+    const placeholders = activeStatuses.map(() => "?").join(", ");
+    const result = this.db
+      .prepare(
+        `UPDATE sessions SET status = ?, last_message_preview = ?, last_activity = datetime('now') WHERE machine_id = ? AND status IN (${placeholders})`,
+      )
+      .run(errorStatus, errorMessage, machineId, ...activeStatuses);
+    return result.changes;
+  }
+
   // ── Refresh Tokens ────────────────────────────────────────────────────
 
   createRefreshToken(accountId: string, expiresAt: string): string {

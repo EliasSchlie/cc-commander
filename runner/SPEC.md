@@ -5,7 +5,7 @@ A small process that runs on each machine where you want to run Claude Code sess
 ## How it works
 
 - Connects outbound to the hub (no ports need to be opened on the machine)
-- Registered to an account via a one-time token
+- Registered to an account via a registration token (issued by the hub when the user adds the machine; persistent for the life of the install)
 - Runs Claude Code sessions using the Claude Agent SDK
 - Streams session output to the hub, which relays it to clients
 - Relays user-interaction requests (questions, etc.) to the hub, waits for responses from clients
