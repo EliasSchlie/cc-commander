@@ -17,6 +17,7 @@ import type {
 import type { HubDb } from "./db.ts";
 import type { AuthService, JwtPayload } from "./auth.ts";
 import { DuplicateEmailError } from "./auth.ts";
+import { TokenBucketRateLimiter } from "./rate_limit.ts";
 
 interface ClientConnection {
   ws: WebSocket;
@@ -42,6 +43,16 @@ export interface HubConfig {
    * the runner self-update protocol (runners will see "" and skip).
    */
   version?: string;
+  /**
+   * Override rate limit settings. Defaults are tuned for production
+   * (5 logins/min/IP, 1 register/min/IP, 10 machines/hour/account).
+   * Tests use higher caps to avoid cross-test pollution.
+   */
+  rateLimits?: {
+    login?: { capacity: number; perMinute: number };
+    register?: { capacity: number; perMinute: number };
+    machineCreate?: { capacity: number; perHour: number };
+  };
 }
 
 export class Hub {
@@ -59,6 +70,9 @@ export class Hub {
   >;
   httpServer: ReturnType<typeof createServer>;
   wss: WebSocketServer;
+  loginLimiter: TokenBucketRateLimiter;
+  registerLimiter: TokenBucketRateLimiter;
+  machineCreateLimiter: TokenBucketRateLimiter;
 
   constructor(config: HubConfig) {
     this.config = config;
@@ -66,12 +80,37 @@ export class Hub {
     this.runners = new Map();
     this.pendingHistoryRequests = new Map();
 
+    const login = config.rateLimits?.login ?? { capacity: 5, perMinute: 5 };
+    const register = config.rateLimits?.register ?? {
+      capacity: 1,
+      perMinute: 1,
+    };
+    const machine = config.rateLimits?.machineCreate ?? {
+      capacity: 10,
+      perHour: 10,
+    };
+    this.loginLimiter = new TokenBucketRateLimiter({
+      capacity: login.capacity,
+      refillPerMs: login.perMinute / 60_000,
+    });
+    this.registerLimiter = new TokenBucketRateLimiter({
+      capacity: register.capacity,
+      refillPerMs: register.perMinute / 60_000,
+    });
+    this.machineCreateLimiter = new TokenBucketRateLimiter({
+      capacity: machine.capacity,
+      refillPerMs: machine.perHour / 3_600_000,
+    });
+
     this.httpServer = createServer((req, res) => this.handleHttp(req, res));
     this.wss = new WebSocketServer({ server: this.httpServer });
     this.wss.on("connection", (ws, req) => this.handleConnection(ws, req));
   }
 
   start(): Promise<void> {
+    this.loginLimiter.startSweeping();
+    this.registerLimiter.startSweeping();
+    this.machineCreateLimiter.startSweeping();
     return new Promise((resolve) => {
       this.httpServer.listen(this.config.port, () => resolve());
     });
@@ -79,6 +118,9 @@ export class Hub {
 
   stop(): Promise<void> {
     return new Promise((resolve, reject) => {
+      this.loginLimiter.stop();
+      this.registerLimiter.stop();
+      this.machineCreateLimiter.stop();
       for (const [, conn] of this.clients) conn.ws.close();
       for (const [, conn] of this.runners) conn.ws.close();
       for (const [, entry] of this.pendingHistoryRequests) {
@@ -133,6 +175,14 @@ export class Hub {
     res: ServerResponse,
     action: "register" | "login",
   ): Promise<void> {
+    const ip = clientIp(req);
+    const limiter =
+      action === "register" ? this.registerLimiter : this.loginLimiter;
+    if (!limiter.tryConsume(ip)) {
+      res.writeHead(429);
+      res.end(JSON.stringify({ error: "Too many requests" }));
+      return;
+    }
     try {
       const body = await readBody(req);
       const { email, password } = body;
@@ -187,6 +237,12 @@ export class Hub {
     } catch {
       res.writeHead(401);
       res.end(JSON.stringify({ error: "Unauthorized" }));
+      return;
+    }
+
+    if (!this.machineCreateLimiter.tryConsume(payload.accountId)) {
+      res.writeHead(429);
+      res.end(JSON.stringify({ error: "Too many machines created recently" }));
       return;
     }
 
@@ -636,6 +692,17 @@ export class Hub {
 }
 
 const BEARER_PREFIX = "Bearer ";
+
+/**
+ * Best-effort client IP. Falls back to "unknown" so a missing socket
+ * address still ends up rate-limited (under one shared bucket) instead
+ * of bypassing the limiter entirely. Does NOT trust X-Forwarded-For:
+ * the hub currently has no proxy-trust config, and trusting that header
+ * unconditionally would let any caller spoof their bucket key.
+ */
+function clientIp(req: IncomingMessage): string {
+  return req.socket.remoteAddress ?? "unknown";
+}
 
 function extractBearerToken(req: IncomingMessage): string | null {
   const header = req.headers["authorization"];

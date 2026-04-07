@@ -80,10 +80,18 @@ async function postJson(
   return { status: res.status, data: await res.json() };
 }
 
+// Ample limits so existing tests don't accidentally trip the rate limiter.
+// Dedicated rate-limit tests construct their own Hub with tight settings.
+const TEST_RATE_LIMITS = {
+  login: { capacity: 1000, perMinute: 1000 },
+  register: { capacity: 1000, perMinute: 1000 },
+  machineCreate: { capacity: 1000, perHour: 1000 },
+};
+
 beforeEach(async () => {
   db = new HubDb(":memory:");
   auth = new AuthService(db, JWT_SECRET);
-  hub = new Hub({ port: 0, db, auth });
+  hub = new Hub({ port: 0, db, auth, rateLimits: TEST_RATE_LIMITS });
   await hub.start();
   const addr = hub.httpServer.address();
   port = typeof addr === "object" && addr ? addr.port : 0;
@@ -630,6 +638,116 @@ describe("pending history cleanup", () => {
     assert.equal(hub.pendingHistoryRequests.size, 0);
 
     await closeWs(clientWs);
+  });
+});
+
+// ── Rate limiting ───────────────────────────────────────────────────────
+
+describe("rate limiting", () => {
+  // Prevents: brute force attacks against /api/auth/login
+  it("returns 429 when login attempts exceed capacity", async () => {
+    await hub.stop();
+    db.close();
+    db = new HubDb(":memory:");
+    auth = new AuthService(db, JWT_SECRET);
+    hub = new Hub({
+      port: 0,
+      db,
+      auth,
+      rateLimits: {
+        login: { capacity: 2, perMinute: 0.0001 },
+        register: { capacity: 100, perMinute: 100 },
+        machineCreate: { capacity: 100, perHour: 100 },
+      },
+    });
+    await hub.start();
+    const addr = hub.httpServer.address();
+    port = typeof addr === "object" && addr ? addr.port : 0;
+    baseUrl = `http://localhost:${port}`;
+
+    await postJson("/api/auth/register", {
+      email: "u@test.com",
+      password: "pw",
+    });
+    // Two logins consume the bucket; third must be rate limited.
+    const r1 = await postJson("/api/auth/login", {
+      email: "u@test.com",
+      password: "pw",
+    });
+    const r2 = await postJson("/api/auth/login", {
+      email: "u@test.com",
+      password: "pw",
+    });
+    const r3 = await postJson("/api/auth/login", {
+      email: "u@test.com",
+      password: "pw",
+    });
+    assert.equal(r1.status, 200);
+    assert.equal(r2.status, 200);
+    assert.equal(r3.status, 429);
+  });
+
+  // Prevents: registration spam from one IP
+  it("returns 429 when register attempts exceed capacity", async () => {
+    await hub.stop();
+    db.close();
+    db = new HubDb(":memory:");
+    auth = new AuthService(db, JWT_SECRET);
+    hub = new Hub({
+      port: 0,
+      db,
+      auth,
+      rateLimits: {
+        login: { capacity: 100, perMinute: 100 },
+        register: { capacity: 1, perMinute: 0.0001 },
+        machineCreate: { capacity: 100, perHour: 100 },
+      },
+    });
+    await hub.start();
+    const addr = hub.httpServer.address();
+    port = typeof addr === "object" && addr ? addr.port : 0;
+    baseUrl = `http://localhost:${port}`;
+
+    const r1 = await postJson("/api/auth/register", {
+      email: "a@test.com",
+      password: "pw",
+    });
+    const r2 = await postJson("/api/auth/register", {
+      email: "b@test.com",
+      password: "pw",
+    });
+    assert.equal(r1.status, 200);
+    assert.equal(r2.status, 429);
+  });
+
+  // Prevents: an authenticated user spamming machine rows + tokens
+  it("returns 429 when machine creation exceeds per-account quota", async () => {
+    await hub.stop();
+    db.close();
+    db = new HubDb(":memory:");
+    auth = new AuthService(db, JWT_SECRET);
+    hub = new Hub({
+      port: 0,
+      db,
+      auth,
+      rateLimits: {
+        login: { capacity: 100, perMinute: 100 },
+        register: { capacity: 100, perMinute: 100 },
+        machineCreate: { capacity: 2, perHour: 0.0001 },
+      },
+    });
+    await hub.start();
+    const addr = hub.httpServer.address();
+    port = typeof addr === "object" && addr ? addr.port : 0;
+    baseUrl = `http://localhost:${port}`;
+
+    const tokens = await auth.register("u@test.com", "pw");
+    const r1 = await postJson("/api/machines", { name: "m1" }, tokens.token);
+    const r2 = await postJson("/api/machines", { name: "m2" }, tokens.token);
+    const r3 = await postJson("/api/machines", { name: "m3" }, tokens.token);
+    assert.equal(r1.status, 201);
+    assert.equal(r2.status, 201);
+    assert.equal(r3.status, 429);
   });
 });
 
