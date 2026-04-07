@@ -1,11 +1,20 @@
 services:
   hub:
-    # Build context is the repo root because hub depends on the
-    # workspace package @cc-commander/protocol (sibling directory).
+    # Both `image` and `build` are present so the same compose file
+    # works for prod (auto-deploy) and local dev:
+    #   - Prod (`docker compose pull && docker compose up -d`):
+    #     pulls the prebuilt image from GHCR. release.yml pushes
+    #     `:main` on every push to main, so the deploy job gets the
+    #     exact binary CI tested. Package visibility is public, so
+    #     no docker login is required on the VPS.
+    #   - Local dev (`docker compose up -d --build`): builds from
+    #     source. The build context is the repo root because hub
+    #     depends on the workspace package @cc-commander/protocol
+    #     (sibling directory).
+    image: ghcr.io/eliasschlie/cc-commander-hub:main
     build:
       context: ..
       dockerfile: hub/Dockerfile
-    image: cc-commander-hub:latest
     container_name: cc-commander-hub
     restart: unless-stopped
     ports:
@@ -15,11 +24,11 @@ services:
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
       PORT: "3000"
       HUB_DB_PATH: /data/hub.db
-      # Optional. When building locally (not via CI), set VERSION in
-      # .env to the git SHA so runners can self-update against this
-      # hub. CI builds bake VERSION via the Dockerfile ARG instead and
-      # this passthrough is a no-op.
-      VERSION: ${VERSION:-}
+      # VERSION is baked into the image via Dockerfile ARG and read
+      # from the container env by /api/version. Do NOT add
+      # `VERSION: ${VERSION:-}` here -- compose env entries override
+      # image ENV, so an unset host var would blank the baked value
+      # and break the runner self-update protocol.
     volumes:
       - hub-data:/data
 
