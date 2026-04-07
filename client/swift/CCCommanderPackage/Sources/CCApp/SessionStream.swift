@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import CCLog
 import CCModels
 
 /// A single entry in the session's chronological log.
@@ -95,7 +96,10 @@ public final class SessionStream {
             return false
         }) else {
             // Protocol violation: log so orphan results aren't silently swallowed.
-            print("[SessionStream] tool_result for unknown toolCallId: \(toolCallId)")
+            CCLog.warn("SessionStream", "tool_result for unknown toolCallId", [
+                "toolCallId": .string(toolCallId),
+                "sessionId": .string(sessionId),
+            ])
             return
         }
         entries[idx].setResult(content)

@@ -1,10 +1,10 @@
 import Foundation
 import Observation
-import OSLog
+import CCLog
 import CCModels
 import CCNetworking
 
-private let log = Logger(subsystem: "com.cc-commander.app", category: "AppState")
+private let log = CCLog.Logger("AppState")
 
 /// A transient error surfaced from the hub (or a local action) so the UI
 /// can show it to the user instead of swallowing it. Each instance gets
@@ -80,12 +80,12 @@ public final class AppState {
             let stream = connection.incomingMessages()
             do {
                 for try await message in stream {
-                    log.debug("dispatch message: \(String(describing: message), privacy: .public)")
+                    log.debug("dispatch message", ["msg": .string(String(describing: message))])
                     handleMessage(message)
                 }
                 log.info("message stream ended")
             } catch {
-                log.error("message stream errored: \(String(describing: error), privacy: .public)")
+                log.error("message stream errored", ["error": .string(String(describing: error))])
             }
         }
     }
@@ -143,7 +143,7 @@ public final class AppState {
             }
 
         case .machineList(let list):
-            log.info("machine_list received with \(list.count, privacy: .public) machine(s)")
+            log.info("machine_list received", ["count": .int(list.count)])
             machines = list
 
         case .streamText(let sessionId, let content):
@@ -184,7 +184,7 @@ public final class AppState {
             streamFor(sessionId).loadHistory(messages, error: error)
 
         case .error(let message):
-            log.error("hub error: \(message, privacy: .public)")
+            log.error("hub error", ["message": .string(message)])
             recordError(message)
         }
     }
