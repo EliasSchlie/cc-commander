@@ -83,7 +83,10 @@ export async function handleCreateMachine(
     );
     ctx.broadcastMachineList(payload.accountId);
   } catch (err) {
-    console.error("[hub] createMachine failed:", err);
+    ctx.log.error("createMachine failed", {
+      accountId: payload.accountId,
+      err: err as Error,
+    });
     res.writeHead(500);
     res.end(JSON.stringify({ error: "Internal error" }));
   }

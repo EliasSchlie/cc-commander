@@ -32,6 +32,10 @@ export interface SessionRow {
   lastMessagePreview: string;
   sdkSessionId: string | null;
   createdAt: string;
+  /** Set when status becomes "error". Null otherwise. */
+  errorMessage: string | null;
+  /** Set when status becomes "idle" or "error" terminally. Null while running. */
+  endedAt: string | null;
 }
 
 export interface RefreshTokenRow {
@@ -85,6 +89,41 @@ export class HubDb {
         created_at TEXT NOT NULL DEFAULT (datetime('now'))
       );
     `);
+
+    // Additive migrations: SQLite has no `ADD COLUMN IF NOT EXISTS`,
+    // and CREATE TABLE IF NOT EXISTS above only initializes a fresh
+    // db. For existing dbs we need to detect and add the post-mortem
+    // columns. Wrapped in try/catch so a re-run on a migrated db is
+    // a no-op (duplicate column errors swallowed).
+    this.addColumnIfMissing("sessions", "error_message", "TEXT");
+    this.addColumnIfMissing("sessions", "ended_at", "TEXT");
+
+    // Index supporting post-mortem queries: "show me all errored
+    // sessions on machine X in the last day". Without it the
+    // dashboards/CC scripts that call listFailedSessionsForAccount
+    // would table-scan every row.
+    this.db.exec(
+      `CREATE INDEX IF NOT EXISTS idx_sessions_account_status_ended
+         ON sessions (account_id, status, ended_at);`,
+    );
+  }
+
+  /**
+   * Idempotent ALTER TABLE ADD COLUMN. SQLite raises if the column
+   * already exists, so we probe with PRAGMA table_info first instead
+   * of relying on error swallowing -- cleaner stack traces if some
+   * other migration error pops up later.
+   */
+  private addColumnIfMissing(
+    table: string,
+    column: string,
+    sqlType: string,
+  ): void {
+    const cols = this.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{
+      name: string;
+    }>;
+    if (cols.some((c) => c.name === column)) return;
+    this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${sqlType}`);
   }
 
   // ── Accounts ──────────────────────────────────────────────────────────
@@ -185,10 +224,26 @@ export class HubDb {
   getSessionById(id: string): SessionRow | undefined {
     const row = this.db
       .prepare(
-        "SELECT id, account_id, machine_id, directory, status, last_activity, last_message_preview, sdk_session_id, created_at FROM sessions WHERE id = ?",
+        "SELECT id, account_id, machine_id, directory, status, last_activity, last_message_preview, sdk_session_id, created_at, error_message, ended_at FROM sessions WHERE id = ?",
       )
       .get(id) as any;
     return row ? toSessionRow(row) : undefined;
+  }
+
+  /**
+   * Post-mortem query: errored sessions for an account, newest first.
+   * Used by /api/debug/state callers and CLI tooling that needs to
+   * answer "what failed recently" without parsing logs. Bounded by
+   * `limit` so the route doesn't accidentally serialize the entire
+   * history.
+   */
+  listFailedSessionsForAccount(accountId: string, limit = 50): SessionRow[] {
+    const rows = this.db
+      .prepare(
+        "SELECT id, account_id, machine_id, directory, status, last_activity, last_message_preview, sdk_session_id, created_at, error_message, ended_at FROM sessions WHERE account_id = ? AND status = 'error' ORDER BY COALESCE(ended_at, last_activity) DESC LIMIT ?",
+      )
+      .all(accountId, limit) as any[];
+    return rows.map(toSessionRow);
   }
 
   listSessionsForAccount(accountId: string): SessionMeta[] {
@@ -214,16 +269,45 @@ export class HubDb {
     status: SessionStatus,
     preview?: string,
   ): void {
+    // Track terminal transitions (error / idle-after-running) by
+    // stamping ended_at, and tag error rows with the preview as the
+    // human-readable error_message. The hub-side message dispatch
+    // already passes the error string as `preview` for status=error,
+    // so this hook captures lifecycle without changing call sites.
+    const isTerminal = status === "error" || status === "idle";
     if (preview !== undefined) {
+      if (status === "error") {
+        this.db
+          .prepare(
+            "UPDATE sessions SET status = ?, last_activity = datetime('now'), last_message_preview = ?, error_message = ?, ended_at = datetime('now') WHERE id = ?",
+          )
+          .run(status, preview, preview, sessionId);
+      } else if (isTerminal) {
+        this.db
+          .prepare(
+            "UPDATE sessions SET status = ?, last_activity = datetime('now'), last_message_preview = ?, ended_at = datetime('now') WHERE id = ?",
+          )
+          .run(status, preview, sessionId);
+      } else {
+        this.db
+          .prepare(
+            "UPDATE sessions SET status = ?, last_activity = datetime('now'), last_message_preview = ? WHERE id = ?",
+          )
+          .run(status, preview, sessionId);
+      }
+    } else if (isTerminal) {
       this.db
         .prepare(
-          "UPDATE sessions SET status = ?, last_activity = datetime('now'), last_message_preview = ? WHERE id = ?",
+          "UPDATE sessions SET status = ?, last_activity = datetime('now'), ended_at = datetime('now') WHERE id = ?",
         )
-        .run(status, preview, sessionId);
+        .run(status, sessionId);
     } else {
+      // Re-entering a non-terminal status (e.g. running after
+      // waiting_for_input) clears any prior ended_at so post-mortem
+      // queries don't mis-classify a recovered session as terminal.
       this.db
         .prepare(
-          "UPDATE sessions SET status = ?, last_activity = datetime('now') WHERE id = ?",
+          "UPDATE sessions SET status = ?, last_activity = datetime('now'), ended_at = NULL WHERE id = ?",
         )
         .run(status, sessionId);
     }
@@ -243,9 +327,15 @@ export class HubDb {
     const placeholders = activeStatuses.map(() => "?").join(", ");
     const result = this.db
       .prepare(
-        `UPDATE sessions SET status = ?, last_message_preview = ?, last_activity = datetime('now') WHERE machine_id = ? AND status IN (${placeholders})`,
+        `UPDATE sessions SET status = ?, last_message_preview = ?, error_message = ?, ended_at = datetime('now'), last_activity = datetime('now') WHERE machine_id = ? AND status IN (${placeholders})`,
       )
-      .run(errorStatus, errorMessage, machineId, ...activeStatuses);
+      .run(
+        errorStatus,
+        errorMessage,
+        errorMessage,
+        machineId,
+        ...activeStatuses,
+      );
     return result.changes;
   }
 
@@ -334,5 +424,7 @@ function toSessionRow(row: any): SessionRow {
     lastMessagePreview: row.last_message_preview,
     sdkSessionId: row.sdk_session_id,
     createdAt: sqliteToIso8601(row.created_at),
+    errorMessage: row.error_message ?? null,
+    endedAt: row.ended_at ? sqliteToIso8601(row.ended_at) : null,
   };
 }

@@ -1449,3 +1449,114 @@ describe("session_history reply routing", () => {
     await closeWs(runnerB);
   });
 });
+
+// ── /api/debug/state ────────────────────────────────────────────────────
+
+describe("GET /api/debug/state", () => {
+  // Prevents: anyone (incl. unauth'd internet) reading hub internals
+  it("requires a bearer token", async () => {
+    const res = await fetch(`${baseUrl}/api/debug/state`);
+    assert.equal(res.status, 401);
+  });
+
+  it("rejects garbage tokens", async () => {
+    const res = await fetch(`${baseUrl}/api/debug/state`, {
+      headers: { Authorization: "Bearer not-a-real-jwt" },
+    });
+    assert.equal(res.status, 401);
+  });
+
+  // Prevents: snapshot regression silently dropping fields a CC
+  // session relies on for autonomous debugging
+  it("returns runtime snapshot for an authenticated caller", async () => {
+    const tokens = await auth.register("debug@test.com", "password");
+    const res = await fetch(`${baseUrl}/api/debug/state`, {
+      headers: { Authorization: `Bearer ${tokens.token}` },
+    });
+    assert.equal(res.status, 200);
+    const data = (await res.json()) as Record<string, unknown>;
+    // Schema check -- if any of these go missing CC's status command
+    // breaks silently, which is exactly what /api/debug/state exists
+    // to prevent.
+    assert.equal(typeof data.version, "string");
+    assert.equal(typeof data.startedAt, "string");
+    assert.equal(typeof data.uptimeSec, "number");
+    assert.equal(typeof data.pid, "number");
+    assert.equal(typeof data.port, "number");
+    assert.ok(data.runners && typeof data.runners === "object");
+    assert.ok(data.clients && typeof data.clients === "object");
+    assert.equal(typeof data.pendingHistory, "number");
+    assert.ok(data.memory && typeof data.memory === "object");
+    assert.ok(data.metrics && typeof data.metrics === "object");
+    assert.ok(Array.isArray(data.recentFailedSessions));
+  });
+
+  // Prevents: cross-account leak via /api/debug/state
+  it("only returns recentFailedSessions for the requester's account", async () => {
+    const a = await auth.register("a@test.com", "password");
+    const b = await auth.register("b@test.com", "password");
+    const machineA = db.createMachine(
+      auth.verifyToken(a.token).accountId,
+      "ma",
+    );
+    const machineB = db.createMachine(
+      auth.verifyToken(b.token).accountId,
+      "mb",
+    );
+    // Both accounts get a failed session.
+    const sA = db.createSession(
+      machineA.accountId,
+      machineA.id,
+      "/x",
+      "running",
+    );
+    db.updateSessionStatus(sA.id, "error", "boom-A");
+    const sB = db.createSession(
+      machineB.accountId,
+      machineB.id,
+      "/y",
+      "running",
+    );
+    db.updateSessionStatus(sB.id, "error", "boom-B");
+
+    const res = await fetch(`${baseUrl}/api/debug/state`, {
+      headers: { Authorization: `Bearer ${a.token}` },
+    });
+    const data = (await res.json()) as { recentFailedSessions: any[] };
+    assert.equal(data.recentFailedSessions.length, 1);
+    assert.equal(data.recentFailedSessions[0].errorMessage, "boom-A");
+  });
+});
+
+// ── Session lifecycle persistence ───────────────────────────────────────
+
+describe("session lifecycle in DB", () => {
+  // Prevents: post-mortem queries returning stale "running" rows
+  it("stamps ended_at and error_message on error", async () => {
+    const tokens = await auth.register("life@test.com", "password");
+    const accountId = auth.verifyToken(tokens.token).accountId;
+    const machine = db.createMachine(accountId, "lab");
+    const sess = db.createSession(accountId, machine.id, "/work", "running");
+    db.updateSessionStatus(sess.id, "error", "the wheels came off");
+    const row = db.getSessionById(sess.id);
+    assert.ok(row);
+    assert.equal(row!.errorMessage, "the wheels came off");
+    assert.ok(row!.endedAt);
+    const failed = db.listFailedSessionsForAccount(accountId);
+    assert.equal(failed.length, 1);
+    assert.equal(failed[0].id, sess.id);
+  });
+
+  // Prevents: a session that recovers from error→running being mis-
+  // classified as terminal in post-mortem queries
+  it("clears ended_at when re-entering a non-terminal status", async () => {
+    const tokens = await auth.register("recov@test.com", "password");
+    const accountId = auth.verifyToken(tokens.token).accountId;
+    const machine = db.createMachine(accountId, "lab");
+    const sess = db.createSession(accountId, machine.id, "/w", "running");
+    db.updateSessionStatus(sess.id, "idle");
+    assert.ok(db.getSessionById(sess.id)!.endedAt);
+    db.updateSessionStatus(sess.id, "running");
+    assert.equal(db.getSessionById(sess.id)!.endedAt, null);
+  });
+});

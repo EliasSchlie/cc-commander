@@ -165,9 +165,11 @@ function handleGetSessionHistory(
     { conn, machineId: result.runnerConn.machineId },
     (expired) => {
       ctx.metrics.inc(HUB_METRIC.HISTORY_TTL_EXPIRED);
-      console.warn(
-        `[hub] session_history TTL expired for request ${requestId} on machine ${expired.machineId}`,
-      );
+      ctx.log.warn("session_history TTL expired", {
+        requestId,
+        machineId: expired.machineId,
+        sessionId: msg.sessionId,
+      });
       ctx.sendToClient(expired.conn, {
         type: "session_history",
         sessionId: msg.sessionId,
