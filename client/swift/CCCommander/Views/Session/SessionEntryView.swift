@@ -3,7 +3,6 @@ import CCApp
 
 struct SessionEntryView: View {
     let entry: SessionEntry
-    let isCurrentTurn: Bool
 
     var body: some View {
         switch entry {
@@ -14,7 +13,7 @@ struct SessionEntryView: View {
                 .padding(.horizontal)
 
         case .toolCall(_, _, let toolName, let display, let result):
-            ToolCallView(toolName: toolName, display: display, result: result, isCurrentTurn: isCurrentTurn)
+            ToolCallView(toolName: toolName, display: display, result: result)
 
         case .userMessage(_, let text):
             HStack {

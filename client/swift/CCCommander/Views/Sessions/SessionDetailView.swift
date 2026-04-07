@@ -4,6 +4,9 @@ import CCApp
 
 struct SessionDetailView: View {
     @Environment(AppState.self) private var appState
+    // Owned here so click-anywhere-in-chat and session-switch can refocus
+    // the input. InputBarView binds to this via `@FocusState.Binding`.
+    @FocusState private var inputFocused: Bool
 
     var body: some View {
         if let session = appState.selectedSession,
@@ -21,12 +24,11 @@ struct SessionDetailView: View {
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 12) {
-                        ForEach(Array(stream.entries.enumerated()), id: \.element.id) { index, entry in
-                            SessionEntryView(
-                                entry: entry,
-                                isCurrentTurn: index >= stream.currentTurnStartIndex
-                            )
-                            .id(entry.id)
+                        ForEach(stream.entries) { entry in
+                            // .id() is for ScrollViewReader.scrollTo --
+                            // ForEach already keys by Identifiable.id.
+                            SessionEntryView(entry: entry)
+                                .id(entry.id)
                         }
 
                         // Live streaming text -- isolated in a leaf view that
@@ -40,8 +42,17 @@ struct SessionDetailView: View {
                                 .id("pending-prompt")
                         }
                     }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.vertical)
+                    .contentShape(Rectangle())
                 }
+                // Click anywhere in the scroll content -> input gets focus.
+                // `simultaneousGesture` lets the text-selection drag gesture
+                // on child Text views still win, so the user can drag-select
+                // assistant/tool output without losing click-to-focus.
+                .simultaneousGesture(
+                    TapGesture().onEnded { inputFocused = true }
+                )
                 .onChange(of: stream.entries.count) {
                     withAnimation {
                         proxy.scrollTo(stream.entries.last?.id, anchor: .bottom)
@@ -51,8 +62,7 @@ struct SessionDetailView: View {
 
             Divider()
 
-            // Input bar
-            InputBarView(isGenerating: stream.isGenerating)
+            InputBarView(isFocused: $inputFocused)
         }
         .navigationTitle(session.directory)
         #if os(iOS)
@@ -63,6 +73,9 @@ struct SessionDetailView: View {
                 StatusBadge(status: session.status)
             }
         }
+        // Focus the input on session entry / switch.
+        .onAppear { inputFocused = true }
+        .onChange(of: appState.selectedSessionId) { inputFocused = true }
     }
 }
 
