@@ -32,7 +32,9 @@ cd cc-commander/hub
 # Generate a JWT secret (>= 32 chars). Save it somewhere safe.
 export JWT_SECRET=$(openssl rand -hex 32)
 
-# Build + start
+# Build + start. The compose file builds with the repo root as the
+# Docker context because the hub depends on the workspace package
+# @cc-commander/protocol (sibling directory).
 docker compose up -d --build
 
 # Verify
@@ -67,7 +69,7 @@ on `v*` builds) into the image and serves it from `GET /api/version`.
 Each runner polls that endpoint every 5 minutes (configurable via
 `CC_COMMANDER_POLL_MS`). When the runner's own checked-out commit no
 longer matches the hub's `VERSION`, the runner runs `runner/scripts/update.sh`
-(`git fetch && git checkout origin/main && npm install`), exits cleanly,
+(`git fetch && git checkout origin/main && npm ci -w cc-commander-runner`), exits cleanly,
 and launchd restarts it against the new code. Logs land in
 `~/Library/Logs/cc-commander-runner-update.log`.
 
@@ -159,8 +161,12 @@ the hub and runs Claude Code sessions on demand using the Claude Agent SDK.
 
 ```sh
 git clone https://github.com/EliasSchlie/cc-commander.git
-cd cc-commander/runner
+cd cc-commander
+# npm workspaces: install at the repo root. This populates a single
+# node_modules at the root that the runner picks up via standard
+# Node.js module resolution.
 npm install
+cd runner
 ```
 
 ### Register the machine with the hub
@@ -236,6 +242,9 @@ or add a settings screen.
 ## 5. Local all-in-one (for testing)
 
 ```sh
+# terminal 0 — install workspace deps once at the repo root
+npm install
+
 # terminal 1 — hub
 cd hub && JWT_SECRET=$(openssl rand -hex 32) HUB_DB_PATH=:memory: npm start
 
@@ -244,7 +253,7 @@ curl -s -X POST http://localhost:3000/api/auth/register \
     -H 'Content-Type: application/json' \
     -d '{"email":"dev@local","password":"devdevdevdevdev"}' >/dev/null
 
-cd runner && npm install
+cd runner
 node --experimental-strip-types src/cli.ts register \
     --hub http://localhost:3000 \
     --email dev@local \

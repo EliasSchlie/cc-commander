@@ -1,7 +1,15 @@
 /**
- * WebSocket message protocol for the hub.
- * Defines all messages the hub sends and receives.
- * The hub is the authority on this protocol -- runner and client must conform.
+ * Wire protocol shared by hub and runner. Single source of truth.
+ *
+ * The hub is the authority on this protocol; runners and clients must
+ * conform. This package exists so the hub-side and runner-side never
+ * drift -- before the extraction the same types lived in two files
+ * kept in sync by hand and one PR (see #13) had to update both
+ * lockstep when adding `toolCallId`.
+ *
+ * The Swift client has its own re-declaration in
+ * `client/swift/CCCommanderPackage/Sources/CCModels/`. That can't share
+ * TypeScript and is unavoidable -- but the two TypeScript sides can.
  */
 
 // ── Session status ──────────────────────────────────────────────────────
@@ -30,6 +38,13 @@ export interface MachineInfo {
   lastSeen: string;
 }
 
+// ── User-prompt response (used by both directions) ──────────────────────
+
+export type UserPromptResponse =
+  | { kind: "answers"; answers: Record<string, string> }
+  | { kind: "allow"; updatedInput?: Record<string, unknown> }
+  | { kind: "deny"; message?: string };
+
 // ── Messages: Client -> Hub ─────────────────────────────────────────────
 
 export interface StartSessionMsg {
@@ -51,11 +66,6 @@ export interface RespondToPromptMsg {
   promptId: string;
   response: UserPromptResponse;
 }
-
-export type UserPromptResponse =
-  | { kind: "answers"; answers: Record<string, string> }
-  | { kind: "allow"; updatedInput?: Record<string, unknown> }
-  | { kind: "deny"; message?: string };
 
 export interface ListSessionsMsg {
   type: "list_sessions";
@@ -227,7 +237,14 @@ export type HubToClientMsg =
 
 // ── Validation & parsing ────────────────────────────────────────────────
 
-const CLIENT_MSG_REQUIRED_FIELDS: Record<string, string[]> = {
+export class MessageValidationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "MessageValidationError";
+  }
+}
+
+const CLIENT_MSG_REQUIRED_FIELDS: Record<string, readonly string[]> = {
   start_session: ["machineId", "directory", "prompt"],
   send_prompt: ["sessionId", "prompt"],
   respond_to_prompt: ["sessionId", "promptId", "response"],
@@ -236,7 +253,7 @@ const CLIENT_MSG_REQUIRED_FIELDS: Record<string, string[]> = {
   list_machines: [],
 };
 
-const RUNNER_MSG_REQUIRED_FIELDS: Record<string, string[]> = {
+const RUNNER_MSG_REQUIRED_FIELDS: Record<string, readonly string[]> = {
   stream_text: ["sessionId", "content"],
   tool_call: ["sessionId", "toolCallId", "toolName", "display"],
   tool_result: ["sessionId", "toolCallId", "content"],
@@ -248,54 +265,83 @@ const RUNNER_MSG_REQUIRED_FIELDS: Record<string, string[]> = {
   runner_hello: ["machineName"],
 };
 
-class MessageValidationError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "MessageValidationError";
-  }
-}
+const HUB_MSG_REQUIRED_FIELDS: Record<string, readonly string[]> = {
+  hub_start_session: ["sessionId", "directory", "prompt"],
+  hub_send_prompt: ["sessionId", "prompt"],
+  hub_respond_to_prompt: ["sessionId", "promptId", "response"],
+  hub_get_history: ["sessionId", "requestId"],
+};
 
 function validateFields(
   msg: Record<string, unknown>,
-  requiredFields: string[],
+  fields: readonly string[],
 ): void {
-  for (const field of requiredFields) {
+  for (const field of fields) {
     if (!(field in msg) || msg[field] === undefined) {
       throw new MessageValidationError(`Missing required field: ${field}`);
     }
   }
 }
 
-export function parseClientMessage(data: string): ClientToHubMsg {
+function parseEnvelope(data: string): Record<string, unknown> {
   const msg = JSON.parse(data);
   if (typeof msg !== "object" || msg === null || typeof msg.type !== "string") {
     throw new MessageValidationError("Invalid message: missing type field");
   }
-  const fields = CLIENT_MSG_REQUIRED_FIELDS[msg.type];
+  return msg as Record<string, unknown>;
+}
+
+export function parseClientMessage(data: string): ClientToHubMsg {
+  const msg = parseEnvelope(data);
+  const fields = CLIENT_MSG_REQUIRED_FIELDS[msg.type as string];
   if (!fields) {
     throw new MessageValidationError(
-      `Unknown client message type: ${msg.type}`,
+      `Unknown client message type: ${msg.type as string}`,
     );
   }
   validateFields(msg, fields);
-  return msg as ClientToHubMsg;
+  return msg as unknown as ClientToHubMsg;
 }
 
 export function parseRunnerMessage(data: string): RunnerToHubMsg {
-  const msg = JSON.parse(data);
-  if (typeof msg !== "object" || msg === null || typeof msg.type !== "string") {
-    throw new MessageValidationError("Invalid message: missing type field");
-  }
-  const fields = RUNNER_MSG_REQUIRED_FIELDS[msg.type];
+  const msg = parseEnvelope(data);
+  const fields = RUNNER_MSG_REQUIRED_FIELDS[msg.type as string];
   if (!fields) {
     throw new MessageValidationError(
-      `Unknown runner message type: ${msg.type}`,
+      `Unknown runner message type: ${msg.type as string}`,
     );
   }
   validateFields(msg, fields);
-  return msg as RunnerToHubMsg;
+  return msg as unknown as RunnerToHubMsg;
 }
 
-export function serialize(msg: { type: string }): string {
+export function parseHubMessage(data: string): HubToRunnerMsg {
+  const msg = parseEnvelope(data);
+  const fields = HUB_MSG_REQUIRED_FIELDS[msg.type as string];
+  if (!fields) {
+    throw new MessageValidationError(
+      `Unknown hub message type: ${msg.type as string}`,
+    );
+  }
+  validateFields(msg, fields);
+  // hub_respond_to_prompt carries an object `response`. The generic
+  // field check only catches missing/undefined; reject non-object
+  // shapes here so the runner doesn't have to defend against it.
+  if (msg.type === "hub_respond_to_prompt") {
+    const response = msg.response;
+    if (
+      typeof response !== "object" ||
+      response === null ||
+      Array.isArray(response)
+    ) {
+      throw new MessageValidationError(
+        'Invalid hub_respond_to_prompt: missing or invalid "response"',
+      );
+    }
+  }
+  return msg as unknown as HubToRunnerMsg;
+}
+
+export function serialize<T extends { type: string }>(msg: T): string {
   return JSON.stringify(msg);
 }

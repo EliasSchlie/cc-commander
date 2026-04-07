@@ -1,6 +1,10 @@
 import Database from "better-sqlite3";
 import { randomUUID } from "node:crypto";
-import type { SessionMeta, SessionStatus, MachineInfo } from "./protocol.ts";
+import type {
+  SessionMeta,
+  SessionStatus,
+  MachineInfo,
+} from "@cc-commander/protocol";
 
 export interface AccountRow {
   id: string;

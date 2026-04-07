@@ -3,8 +3,9 @@ import assert from "node:assert/strict";
 import {
   parseClientMessage,
   parseRunnerMessage,
+  parseHubMessage,
   serialize,
-} from "../protocol.ts";
+} from "../index.ts";
 
 describe("parseClientMessage", () => {
   // Prevents: malformed messages crashing downstream handlers
@@ -106,6 +107,49 @@ describe("parseRunnerMessage", () => {
       '{"type":"tool_result","sessionId":"s1","toolCallId":"tc1","content":"x"}',
     );
     assert.equal(result.type, "tool_result");
+  });
+});
+
+describe("parseHubMessage", () => {
+  // Prevents: runner accepting malformed hub commands
+  it("parses a valid hub_start_session", () => {
+    const msg = parseHubMessage(
+      '{"type":"hub_start_session","sessionId":"s1","directory":"/tmp","prompt":"hi"}',
+    );
+    assert.equal(msg.type, "hub_start_session");
+  });
+
+  it("throws on unknown hub message type", () => {
+    assert.throws(
+      () => parseHubMessage('{"type":"hub_drop_table"}'),
+      /Unknown hub message type/,
+    );
+  });
+
+  it("rejects hub_get_history without requestId", () => {
+    assert.throws(
+      () => parseHubMessage('{"type":"hub_get_history","sessionId":"s1"}'),
+      /Missing required field: requestId/,
+    );
+  });
+
+  // Prevents: response field passing the generic check while being a
+  // string/array/null instead of an object
+  it("rejects hub_respond_to_prompt with non-object response", () => {
+    assert.throws(
+      () =>
+        parseHubMessage(
+          '{"type":"hub_respond_to_prompt","sessionId":"s1","promptId":"p","response":"yes"}',
+        ),
+      /missing or invalid "response"/,
+    );
+  });
+
+  it("accepts hub_respond_to_prompt with object response", () => {
+    const msg = parseHubMessage(
+      '{"type":"hub_respond_to_prompt","sessionId":"s1","promptId":"p","response":{"kind":"deny"}}',
+    );
+    assert.equal(msg.type, "hub_respond_to_prompt");
   });
 });
 

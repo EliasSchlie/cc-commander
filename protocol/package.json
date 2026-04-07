@@ -1,0 +1,16 @@
+{
+  "name": "@cc-commander/protocol",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "node --test --experimental-strip-types 'src/__tests__/*.test.ts'",
+    "typecheck": "tsc -p tsconfig.check.json"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0"
+  }
+}
