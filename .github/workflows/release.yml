@@ -43,8 +43,8 @@ jobs:
     name: Hub tests (gate)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
         with:
           node-version: "22"
           cache: npm
@@ -60,7 +60,7 @@ jobs:
     outputs:
       version: ${{ steps.meta.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Compute VERSION + image tags
         id: meta
@@ -88,9 +88,9 @@ jobs:
               echo "EOF"
           } >> "$GITHUB_OUTPUT"
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
 
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -98,7 +98,7 @@ jobs:
 
       - name: Build & push
         id: build
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           # Build context is the repo root because hub depends on the
           # workspace package @cc-commander/protocol (sibling directory).
@@ -154,7 +154,7 @@ jobs:
 
       - name: SSH deploy
         if: steps.gate.outputs.skip != 'true'
-        uses: appleboy/ssh-action@v1.2.0
+        uses: appleboy/ssh-action@v1.2.5
         env:
           DEPLOY_HUB_DIR: ${{ secrets.DEPLOY_HUB_DIR }}
         with:
