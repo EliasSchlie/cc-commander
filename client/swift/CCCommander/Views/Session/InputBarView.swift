@@ -14,18 +14,15 @@ struct InputBarView: View {
                 .lineLimit(1...5)
                 .focused($isFocused)
                 .disabled(isGenerating)
-                .onSubmit {
-                    // Only submit on Cmd+Return (plain Return adds newline in multiline)
-                }
 
             Button {
                 send()
             } label: {
-                Image(systemName: isGenerating ? "stop.fill" : "arrow.up.circle.fill")
+                Image(systemName: "arrow.up.circle.fill")
                     .font(.title2)
             }
             .buttonStyle(.borderless)
-            .disabled(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !isGenerating)
+            .disabled(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isGenerating)
             .keyboardShortcut(.return, modifiers: .command)
         }
         .padding(.horizontal, 12)

@@ -6,7 +6,9 @@ import CCModels
 public actor MockWebSocketClient: WebSocketClientProtocol {
     public private(set) var isConnected = false
     public private(set) var sentMessages: [ClientMessage] = []
-    public private(set) var connectedURL: URL?
+    public private(set) var connectedRequest: URLRequest?
+
+    public var connectedURL: URL? { connectedRequest?.url }
 
     private var scriptedMessages: [ServerMessage]
     private var continuation: AsyncThrowingStream<ServerMessage, Error>.Continuation?
@@ -17,11 +19,11 @@ public actor MockWebSocketClient: WebSocketClientProtocol {
         self.shouldFailConnect = shouldFailConnect
     }
 
-    public func connect(url: URL) async throws {
+    public func connect(request: URLRequest) async throws {
         if shouldFailConnect {
             throw WebSocketError.connectionFailed("Mock connection failure")
         }
-        connectedURL = url
+        connectedRequest = request
         isConnected = true
     }
 

@@ -43,31 +43,24 @@ struct StatusBadge: View {
     var body: some View {
         HStack(spacing: 4) {
             Circle()
-                .fill(statusColor)
+                .fill(status.tintColor)
                 .frame(width: 6, height: 6)
-            Text(statusLabel)
+            Text(status.displayName)
                 .font(.caption2)
         }
         .padding(.horizontal, 6)
         .padding(.vertical, 2)
-        .background(statusColor.opacity(0.1), in: Capsule())
+        .background(status.tintColor.opacity(0.1), in: Capsule())
     }
+}
 
-    private var statusColor: Color {
-        switch status {
+extension SessionStatus {
+    var tintColor: Color {
+        switch self {
         case .running: return .blue
         case .idle: return .green
         case .waitingForInput: return .orange
         case .error: return .red
-        }
-    }
-
-    private var statusLabel: String {
-        switch status {
-        case .running: return "Running"
-        case .idle: return "Idle"
-        case .waitingForInput: return "Waiting"
-        case .error: return "Error"
         }
     }
 }

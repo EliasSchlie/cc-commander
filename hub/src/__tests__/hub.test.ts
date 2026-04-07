@@ -198,6 +198,20 @@ describe("WebSocket auth", () => {
     });
     assert.equal(code, 4001);
   });
+
+  // Prevents: JWT in URL query string showing up in access logs
+  it("accepts client token via Authorization header", async () => {
+    const tokens = await auth.register("hdr@test.com", "password");
+    const ws = new WebSocket(`ws://localhost:${port}/ws/client`, {
+      headers: { Authorization: `Bearer ${tokens.token}` },
+    });
+    await new Promise<void>((resolve, reject) => {
+      ws.on("open", () => resolve());
+      ws.on("error", reject);
+    });
+    assert.equal(ws.readyState, WebSocket.OPEN);
+    ws.close();
+  });
 });
 
 // ── Message validation ──────────────────────────────────────────────────

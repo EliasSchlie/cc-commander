@@ -100,37 +100,22 @@ struct UserPromptView: View {
     }
 
     private func submitAnswers() {
-        isSubmitting = true
-        Task {
-            try? await appState.respondToPrompt(
-                promptId: prompt.promptId,
-                response: .answers(answers)
-            )
-            appState.selectedSessionStream?.clearPendingPrompt(
-                summary: answers.values.joined(separator: ", ")
-            )
-        }
+        submit(.answers(answers), summary: answers.values.joined(separator: ", "))
     }
 
     private func submitAllow() {
-        isSubmitting = true
-        Task {
-            try? await appState.respondToPrompt(
-                promptId: prompt.promptId,
-                response: .allow()
-            )
-            appState.selectedSessionStream?.clearPendingPrompt(summary: "Allowed")
-        }
+        submit(.allow(), summary: "Allowed")
     }
 
     private func submitDeny() {
+        submit(.deny(message: "Denied by user"), summary: "Denied")
+    }
+
+    private func submit(_ response: UserPromptResponse, summary: String) {
         isSubmitting = true
         Task {
-            try? await appState.respondToPrompt(
-                promptId: prompt.promptId,
-                response: .deny(message: "Denied by user")
-            )
-            appState.selectedSessionStream?.clearPendingPrompt(summary: "Denied")
+            try? await appState.respondToPrompt(promptId: prompt.promptId, response: response)
+            appState.selectedSessionStream?.clearPendingPrompt(summary: summary)
         }
     }
 }

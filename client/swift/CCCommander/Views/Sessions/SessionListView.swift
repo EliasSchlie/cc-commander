@@ -49,10 +49,9 @@ struct SessionListView: View {
                 Menu {
                     Button("All") { filterStatus = nil }
                     Divider()
-                    Button("Running") { filterStatus = .running }
-                    Button("Idle") { filterStatus = .idle }
-                    Button("Waiting") { filterStatus = .waitingForInput }
-                    Button("Error") { filterStatus = .error }
+                    ForEach(SessionStatus.allCases, id: \.self) { status in
+                        Button(status.displayName) { filterStatus = status }
+                    }
                 } label: {
                     Label("Filter", systemImage: "line.3.horizontal.decrease.circle")
                 }

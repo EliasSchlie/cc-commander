@@ -35,9 +35,11 @@ struct HubConnectionTests {
         let (conn, _, _, _) = makeConnection(mockWS: mockWS)
         try await conn.login(email: "user@test.com", password: "pass")
         #expect(conn.state == .connected)
-        let url = await mockWS.connectedURL
-        #expect(url?.path == "/ws/client")
-        #expect(url?.query?.contains("token=mock-jwt") == true)
+        let request = await mockWS.connectedRequest
+        #expect(request?.url?.path == "/ws/client")
+        // Token must be in Authorization header, not query string
+        #expect(request?.value(forHTTPHeaderField: "Authorization") == "Bearer mock-jwt")
+        #expect(request?.url?.query == nil)
     }
 
     // Prevents: register doesn't work the same as login
@@ -93,8 +95,8 @@ struct HubConnectionTests {
         let (conn, _, _, _) = makeConnection(mockWS: mockWS, keychain: keychain)
         try await conn.connectWithStoredTokens()
         #expect(conn.state == .connected)
-        let url = await mockWS.connectedURL
-        #expect(url?.query?.contains("token=stored-jwt") == true)
+        let request = await mockWS.connectedRequest
+        #expect(request?.value(forHTTPHeaderField: "Authorization") == "Bearer stored-jwt")
     }
 
     // Prevents: no stored tokens throws unhandled error

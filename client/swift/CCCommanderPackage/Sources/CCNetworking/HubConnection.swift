@@ -165,36 +165,34 @@ public final class HubConnection {
         let ws = wsClientFactory()
         self.wsClient = ws
 
-        // Build WSS URL
+        // Build WSS URL with token in Authorization header (not query string,
+        // to keep JWTs out of access logs).
         guard var components = URLComponents(url: baseURL, resolvingAgainstBaseURL: false) else {
             throw HubConnectionError.invalidURL
         }
         components.path = "/ws/client"
-        components.queryItems = [URLQueryItem(name: "token", value: token)]
-        if components.scheme == "https" {
-            components.scheme = "wss"
-        } else {
-            components.scheme = "ws"
-        }
+        components.scheme = (components.scheme == "https") ? "wss" : "ws"
         guard let wsURL = components.url else {
             throw HubConnectionError.invalidURL
         }
 
-        try await ws.connect(url: wsURL)
+        var request = URLRequest(url: wsURL)
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        try await ws.connect(request: request)
         state = .connected
         reconnectDelay = 1.0
 
         // Start reading messages
         messageStreamTask?.cancel()
-        messageStreamTask = Task { [weak self] in
+        messageStreamTask = Task { @MainActor [weak self] in
             let stream = await ws.messages()
             do {
                 for try await msg in stream {
-                    await self?.messageContinuation?.yield(msg)
+                    self?.messageContinuation?.yield(msg)
                 }
-                await self?.handleDisconnect()
+                self?.handleDisconnect()
             } catch {
-                await self?.handleDisconnect()
+                self?.handleDisconnect()
             }
         }
     }
@@ -208,29 +206,45 @@ public final class HubConnection {
 
     private func scheduleReconnect() {
         reconnectTask?.cancel()
-        reconnectTask = Task { [weak self] in
-            guard let self, shouldReconnect else { return }
-            let delay = reconnectDelay
-            try? await Task.sleep(for: .seconds(delay))
-            guard !Task.isCancelled, shouldReconnect else { return }
+        reconnectTask = Task { @MainActor [weak self] in
+            // One task drains all reconnect attempts via a loop, so cancellation
+            // doesn't race with self-rescheduling.
+            while let self, self.shouldReconnect, !Task.isCancelled {
+                let delay = self.reconnectDelay
+                try? await Task.sleep(for: .seconds(delay))
+                if Task.isCancelled { return }
+                self.bumpReconnectDelay()
 
-            reconnectDelay = min(reconnectDelay * 2, maxReconnectDelay)
-
-            do {
-                // Try stored JWT first; only refresh if that fails
-                if let token = keychain.jwt {
-                    try await connectWebSocket(token: token)
-                } else if let refresh = keychain.refreshToken {
-                    let tokens = try await authClient.refresh(refreshToken: refresh)
-                    try keychain.saveTokens(jwt: tokens.token, refreshToken: tokens.refreshToken)
-                    try await connectWebSocket(token: tokens.token)
-                }
-            } catch {
-                if shouldReconnect {
-                    scheduleReconnect()
+                do {
+                    try await self.attemptReconnect()
+                    return  // Connected -- exit the loop
+                } catch {
+                    // Loop and retry after the next backoff
                 }
             }
         }
+    }
+
+    private func bumpReconnectDelay() {
+        reconnectDelay = min(reconnectDelay * 2, maxReconnectDelay)
+    }
+
+    private func attemptReconnect() async throws {
+        // Try stored JWT first; only refresh if it's rejected.
+        if let token = keychain.jwt {
+            do {
+                try await connectWebSocket(token: token)
+                return
+            } catch is WebSocketError {
+                // JWT may be expired -- fall through to refresh
+            }
+        }
+        guard let refresh = keychain.refreshToken else {
+            throw HubConnectionError.noStoredTokens
+        }
+        let tokens = try await authClient.refresh(refreshToken: refresh)
+        try keychain.saveTokens(jwt: tokens.token, refreshToken: tokens.refreshToken)
+        try await connectWebSocket(token: tokens.token)
     }
 }
 

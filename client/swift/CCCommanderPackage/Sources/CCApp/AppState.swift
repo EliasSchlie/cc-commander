@@ -88,6 +88,9 @@ public final class AppState {
         switch message {
         case .sessionList(let list):
             sessions = list
+            // Evict streams for sessions no longer in the list
+            let liveIds = Set(list.map(\.sessionId))
+            sessionStreams = sessionStreams.filter { liveIds.contains($0.key) }
 
         case .machineList(let list):
             machines = list
@@ -105,11 +108,9 @@ public final class AppState {
             streamFor(payload.sessionId).setPendingPrompt(payload)
 
         case .sessionStatus(let sessionId, let status, let preview):
-            if let idx = sessions.firstIndex(where: { $0.sessionId == sessionId }) {
-                sessions[idx].status = status
-                if let preview {
-                    sessions[idx].lastMessagePreview = preview
-                }
+            updateSession(sessionId) {
+                $0.status = status
+                if let preview { $0.lastMessagePreview = preview }
             }
             let stream = streamFor(sessionId)
             let wasGenerating = stream.status == .running
@@ -119,17 +120,13 @@ public final class AppState {
             }
 
         case .sessionDone(let payload):
-            if let idx = sessions.firstIndex(where: { $0.sessionId == payload.sessionId }) {
-                sessions[idx].status = .idle
-            }
+            updateSession(payload.sessionId) { $0.status = .idle }
             let stream = streamFor(payload.sessionId)
             stream.status = .idle
             stream.flushTurn()
 
         case .sessionError(let sessionId, let error):
-            if let idx = sessions.firstIndex(where: { $0.sessionId == sessionId }) {
-                sessions[idx].status = .error
-            }
+            updateSession(sessionId) { $0.status = .error }
             streamFor(sessionId).addError(error)
 
         case .sessionHistory(let sessionId, _, let messages):
@@ -138,6 +135,11 @@ public final class AppState {
         case .error(let message):
             print("Hub error: \(message)")
         }
+    }
+
+    private func updateSession(_ id: String, _ mutate: (inout SessionMeta) -> Void) {
+        guard let idx = sessions.firstIndex(where: { $0.sessionId == id }) else { return }
+        mutate(&sessions[idx])
     }
 
     private func streamFor(_ sessionId: String) -> SessionStream {

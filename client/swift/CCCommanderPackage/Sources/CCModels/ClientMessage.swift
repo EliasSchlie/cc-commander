@@ -11,6 +11,15 @@ public enum ClientMessage: Sendable {
 }
 
 extension ClientMessage: Encodable {
+    private enum MessageType: String {
+        case startSession = "start_session"
+        case sendPrompt = "send_prompt"
+        case respondToPrompt = "respond_to_prompt"
+        case listSessions = "list_sessions"
+        case getSessionHistory = "get_session_history"
+        case listMachines = "list_machines"
+    }
+
     private enum CodingKeys: String, CodingKey {
         case type, machineId, directory, prompt, sessionId, promptId, response
     }
@@ -19,31 +28,31 @@ extension ClientMessage: Encodable {
         var container = encoder.container(keyedBy: CodingKeys.self)
         switch self {
         case .startSession(let machineId, let directory, let prompt):
-            try container.encode("start_session", forKey: .type)
+            try container.encode(MessageType.startSession.rawValue, forKey: .type)
             try container.encode(machineId, forKey: .machineId)
             try container.encode(directory, forKey: .directory)
             try container.encode(prompt, forKey: .prompt)
 
         case .sendPrompt(let sessionId, let prompt):
-            try container.encode("send_prompt", forKey: .type)
+            try container.encode(MessageType.sendPrompt.rawValue, forKey: .type)
             try container.encode(sessionId, forKey: .sessionId)
             try container.encode(prompt, forKey: .prompt)
 
         case .respondToPrompt(let sessionId, let promptId, let response):
-            try container.encode("respond_to_prompt", forKey: .type)
+            try container.encode(MessageType.respondToPrompt.rawValue, forKey: .type)
             try container.encode(sessionId, forKey: .sessionId)
             try container.encode(promptId, forKey: .promptId)
             try container.encode(response, forKey: .response)
 
         case .listSessions:
-            try container.encode("list_sessions", forKey: .type)
+            try container.encode(MessageType.listSessions.rawValue, forKey: .type)
 
         case .getSessionHistory(let sessionId):
-            try container.encode("get_session_history", forKey: .type)
+            try container.encode(MessageType.getSessionHistory.rawValue, forKey: .type)
             try container.encode(sessionId, forKey: .sessionId)
 
         case .listMachines:
-            try container.encode("list_machines", forKey: .type)
+            try container.encode(MessageType.listMachines.rawValue, forKey: .type)
         }
     }
 }

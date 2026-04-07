@@ -15,8 +15,8 @@ public actor WebSocketClient: WebSocketClientProtocol {
         self.encoder = JSONEncoder()
     }
 
-    public func connect(url: URL) async throws {
-        let task = session.webSocketTask(with: url)
+    public func connect(request: URLRequest) async throws {
+        let task = session.webSocketTask(with: request)
         task.resume()
         self.task = task
         // Send a ping to verify connection is alive

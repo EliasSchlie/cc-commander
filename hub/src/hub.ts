@@ -155,7 +155,7 @@ export class Hub {
     const url = new URL(req.url || "/", `http://localhost:${this.config.port}`);
 
     if (url.pathname === "/ws/client") {
-      this.handleClientConnection(ws, url);
+      this.handleClientConnection(ws, url, req);
     } else if (url.pathname === "/ws/agent") {
       this.handleAgentConnection(ws, url);
     } else {
@@ -165,8 +165,19 @@ export class Hub {
 
   // ── Client connections ────────────────────────────────────────────────
 
-  private handleClientConnection(ws: WebSocket, url: URL): void {
-    const token = url.searchParams.get("token");
+  private handleClientConnection(
+    ws: WebSocket,
+    url: URL,
+    req: IncomingMessage,
+  ): void {
+    // Prefer Authorization header (no token in logs); fall back to query
+    // string for browser clients which can't set headers on WebSocket.
+    const authHeader = req.headers["authorization"];
+    const headerToken =
+      typeof authHeader === "string" && authHeader.startsWith("Bearer ")
+        ? authHeader.slice("Bearer ".length)
+        : null;
+    const token = headerToken ?? url.searchParams.get("token");
     if (!token) {
       ws.close(4001, "Missing token");
       return;

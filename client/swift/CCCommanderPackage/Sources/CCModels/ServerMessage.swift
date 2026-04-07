@@ -16,10 +16,6 @@ public enum ServerMessage: Sendable {
 }
 
 extension ServerMessage: Decodable {
-    private enum TypeKey: String, CodingKey {
-        case type
-    }
-
     private enum MessageType: String, Decodable {
         case sessionList = "session_list"
         case machineList = "machine_list"
@@ -34,101 +30,69 @@ extension ServerMessage: Decodable {
         case error
     }
 
+    private enum CodingKeys: String, CodingKey {
+        case type, sessions, machines, sessionId, content, toolName, display
+        case status, lastMessagePreview, error, requestId, messages, message
+    }
+
     public init(from decoder: Decoder) throws {
-        let typeContainer = try decoder.container(keyedBy: TypeKey.self)
-        let type = try typeContainer.decode(MessageType.self, forKey: .type)
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let type = try c.decode(MessageType.self, forKey: .type)
 
         switch type {
         case .sessionList:
-            let payload = try SessionListPayload(from: decoder)
-            self = .sessionList(payload.sessions)
+            self = .sessionList(try c.decode([SessionMeta].self, forKey: .sessions))
 
         case .machineList:
-            let payload = try MachineListPayload(from: decoder)
-            self = .machineList(payload.machines)
+            self = .machineList(try c.decode([MachineInfo].self, forKey: .machines))
 
         case .streamText:
-            let payload = try StreamTextPayload(from: decoder)
-            self = .streamText(sessionId: payload.sessionId, content: payload.content)
+            self = .streamText(
+                sessionId: try c.decode(String.self, forKey: .sessionId),
+                content: try c.decode(String.self, forKey: .content)
+            )
 
         case .toolCall:
-            let payload = try ToolCallPayload(from: decoder)
-            self = .toolCall(sessionId: payload.sessionId, toolName: payload.toolName, display: payload.display)
+            self = .toolCall(
+                sessionId: try c.decode(String.self, forKey: .sessionId),
+                toolName: try c.decode(String.self, forKey: .toolName),
+                display: try c.decode(String.self, forKey: .display)
+            )
 
         case .toolResult:
-            let payload = try ToolResultPayload(from: decoder)
-            self = .toolResult(sessionId: payload.sessionId, content: payload.content)
+            self = .toolResult(
+                sessionId: try c.decode(String.self, forKey: .sessionId),
+                content: try c.decode(String.self, forKey: .content)
+            )
 
         case .userPrompt:
-            let payload = try UserPromptPayload(from: decoder)
-            self = .userPrompt(payload)
+            self = .userPrompt(try UserPromptPayload(from: decoder))
 
         case .sessionStatus:
-            let payload = try SessionStatusPayload(from: decoder)
-            self = .sessionStatus(sessionId: payload.sessionId, status: payload.status, lastMessagePreview: payload.lastMessagePreview)
+            self = .sessionStatus(
+                sessionId: try c.decode(String.self, forKey: .sessionId),
+                status: try c.decode(SessionStatus.self, forKey: .status),
+                lastMessagePreview: try c.decodeIfPresent(String.self, forKey: .lastMessagePreview)
+            )
 
         case .sessionDone:
-            let payload = try SessionDonePayload(from: decoder)
-            self = .sessionDone(payload)
+            self = .sessionDone(try SessionDonePayload(from: decoder))
 
         case .sessionError:
-            let payload = try SessionErrorPayload(from: decoder)
-            self = .sessionError(sessionId: payload.sessionId, error: payload.error)
+            self = .sessionError(
+                sessionId: try c.decode(String.self, forKey: .sessionId),
+                error: try c.decode(String.self, forKey: .error)
+            )
 
         case .sessionHistory:
-            let payload = try SessionHistoryPayload(from: decoder)
-            self = .sessionHistory(sessionId: payload.sessionId, requestId: payload.requestId, messages: payload.messages)
+            self = .sessionHistory(
+                sessionId: try c.decode(String.self, forKey: .sessionId),
+                requestId: try c.decode(String.self, forKey: .requestId),
+                messages: try c.decode([AnyCodable].self, forKey: .messages)
+            )
 
         case .error:
-            let payload = try ErrorPayload(from: decoder)
-            self = .error(message: payload.message)
+            self = .error(message: try c.decode(String.self, forKey: .message))
         }
     }
-}
-
-// MARK: - Internal decode-only payloads
-
-private struct SessionListPayload: Decodable {
-    let sessions: [SessionMeta]
-}
-
-private struct MachineListPayload: Decodable {
-    let machines: [MachineInfo]
-}
-
-private struct StreamTextPayload: Decodable {
-    let sessionId: String
-    let content: String
-}
-
-private struct ToolCallPayload: Decodable {
-    let sessionId: String
-    let toolName: String
-    let display: String
-}
-
-private struct ToolResultPayload: Decodable {
-    let sessionId: String
-    let content: String
-}
-
-private struct SessionStatusPayload: Decodable {
-    let sessionId: String
-    let status: SessionStatus
-    let lastMessagePreview: String?
-}
-
-private struct SessionErrorPayload: Decodable {
-    let sessionId: String
-    let error: String
-}
-
-private struct SessionHistoryPayload: Decodable {
-    let sessionId: String
-    let requestId: String
-    let messages: [AnyCodable]
-}
-
-private struct ErrorPayload: Decodable {
-    let message: String
 }
