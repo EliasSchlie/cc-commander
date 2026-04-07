@@ -1,6 +1,10 @@
 services:
   hub:
-    build: .
+    # Build context is the repo root because hub depends on the
+    # workspace package @cc-commander/protocol (sibling directory).
+    build:
+      context: ..
+      dockerfile: hub/Dockerfile
     image: cc-commander-hub:latest
     container_name: cc-commander-hub
     restart: unless-stopped
