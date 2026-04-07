@@ -31,6 +31,11 @@ struct SessionDetailView: View {
                             .id(entry.id)
                         }
 
+                        // Live streaming text -- isolated in a leaf view that
+                        // observes only `pendingText`, so per-token updates do
+                        // not invalidate the parent ForEach over `entries`.
+                        LiveStreamingTextView(stream: stream, scrollProxy: proxy)
+
                         // Pending user prompt
                         if let prompt = stream.pendingPrompt {
                             UserPromptView(prompt: prompt)
@@ -43,9 +48,6 @@ struct SessionDetailView: View {
                     withAnimation {
                         proxy.scrollTo(stream.entries.last?.id, anchor: .bottom)
                     }
-                }
-                .onChange(of: stream.streamRevision) {
-                    proxy.scrollTo(stream.entries.last?.id, anchor: .bottom)
                 }
             }
 
@@ -68,6 +70,27 @@ struct SessionDetailView: View {
             if stream.entries.isEmpty {
                 try? await appState.loadSessionHistory(sessionId: session.sessionId)
             }
+        }
+    }
+}
+
+/// Renders the in-progress assistant text. Reading `stream.pendingText` here
+/// (and nowhere in the parent) keeps per-token updates from invalidating the
+/// outer ForEach over `entries`.
+private struct LiveStreamingTextView: View {
+    let stream: SessionStream
+    let scrollProxy: ScrollViewProxy
+
+    var body: some View {
+        if !stream.pendingText.isEmpty {
+            Text(stream.pendingText)
+                .font(.body)
+                .textSelection(.enabled)
+                .padding(.horizontal)
+                .id("pending-text")
+                .onChange(of: stream.pendingText) {
+                    scrollProxy.scrollTo("pending-text", anchor: .bottom)
+                }
         }
     }
 }

@@ -19,6 +19,13 @@ public enum SessionEntry: Identifiable {
         case .error(let id, _): return id
         }
     }
+
+    /// Set the result on a `.toolCall` entry. No-op for other cases.
+    mutating func setResult(_ content: String) {
+        if case .toolCall(let id, let tcId, let name, let display, _) = self {
+            self = .toolCall(id: id, toolCallId: tcId, toolName: name, display: display, result: content)
+        }
+    }
 }
 
 /// Per-session live state. Accumulates streaming events into a chronological log.
@@ -27,6 +34,12 @@ public enum SessionEntry: Identifiable {
 public final class SessionStream {
     public let sessionId: String
     public var entries: [SessionEntry] = []
+
+    /// Live, in-progress assistant text from the current `stream_text` deltas.
+    /// Read by a dedicated sub-view so per-token mutation does not invalidate
+    /// the parent ForEach over `entries`.
+    public var pendingText: String = ""
+
     public var status: SessionStatus = .idle
     public var pendingPrompt: UserPromptPayload?
 
@@ -35,36 +48,20 @@ public final class SessionStream {
     /// rendered expanded; earlier ones are collapsed by default.
     public var currentTurnStartIndex: Int = 0
 
-    /// Bumped on each `appendText` so views can observe streaming text growth
-    /// without changing `entries.count`.
-    public var streamRevision: Int = 0
-
     public var isGenerating: Bool { status == .running }
-
-    /// ID of the assistantText entry that the next stream_text delta should
-    /// append to. Reset by tool calls and turn boundaries.
-    private var openAssistantTextId: String?
 
     public init(sessionId: String) {
         self.sessionId = sessionId
     }
 
     public func appendText(_ text: String) {
-        if let openId = openAssistantTextId,
-           let lastIdx = entries.indices.last,
-           case .assistantText(let id, let existing) = entries[lastIdx],
-           id == openId {
-            entries[lastIdx] = .assistantText(id: id, text: existing + text)
-        } else {
-            let newId = UUID().uuidString
-            entries.append(.assistantText(id: newId, text: text))
-            openAssistantTextId = newId
-        }
-        streamRevision &+= 1
+        // String.append is amortized O(1) (exponential capacity growth) when
+        // uniquely referenced. += compiles to the same op.
+        pendingText += text
     }
 
     public func addToolCall(toolCallId: String, toolName: String, display: String) {
-        openAssistantTextId = nil
+        flushPendingText()
         entries.append(.toolCall(
             id: UUID().uuidString,
             toolCallId: toolCallId,
@@ -78,15 +75,16 @@ public final class SessionStream {
         guard let idx = entries.lastIndex(where: {
             if case .toolCall(_, let tcId, _, _, _) = $0 { return tcId == toolCallId }
             return false
-        }) else { return }
-
-        if case .toolCall(let id, let tcId, let name, let display, _) = entries[idx] {
-            entries[idx] = .toolCall(id: id, toolCallId: tcId, toolName: name, display: display, result: content)
+        }) else {
+            // Protocol violation: log so orphan results aren't silently swallowed.
+            print("[SessionStream] tool_result for unknown toolCallId: \(toolCallId)")
+            return
         }
+        entries[idx].setResult(content)
     }
 
     public func setPendingPrompt(_ payload: UserPromptPayload) {
-        openAssistantTextId = nil
+        flushPendingText()
         pendingPrompt = payload
     }
 
@@ -96,12 +94,12 @@ public final class SessionStream {
     }
 
     public func addError(_ message: String) {
-        openAssistantTextId = nil
+        flushPendingText()
         entries.append(.error(id: UUID().uuidString, message: message))
     }
 
     public func flushTurn() {
-        openAssistantTextId = nil
+        flushPendingText()
         currentTurnStartIndex = entries.count
     }
 
@@ -119,5 +117,13 @@ public final class SessionStream {
             }
         }
         currentTurnStartIndex = entries.count
+    }
+
+    // MARK: - Private
+
+    private func flushPendingText() {
+        guard !pendingText.isEmpty else { return }
+        entries.append(.assistantText(id: UUID().uuidString, text: pendingText))
+        pendingText = ""
     }
 }

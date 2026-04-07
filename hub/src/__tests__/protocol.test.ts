@@ -74,6 +74,39 @@ describe("parseRunnerMessage", () => {
       /Missing required field: sdkSessionId/,
     );
   });
+
+  // Prevents: tool_call slipping through without toolCallId, breaking
+  // result-by-id correlation downstream (see #9)
+  it("rejects tool_call without toolCallId", () => {
+    assert.throws(
+      () =>
+        parseRunnerMessage(
+          '{"type":"tool_call","sessionId":"s1","toolName":"Read","display":"x"}',
+        ),
+      /Missing required field: toolCallId/,
+    );
+  });
+
+  it("rejects tool_result without toolCallId", () => {
+    assert.throws(
+      () =>
+        parseRunnerMessage(
+          '{"type":"tool_result","sessionId":"s1","content":"x"}',
+        ),
+      /Missing required field: toolCallId/,
+    );
+  });
+
+  it("accepts tool_call and tool_result with toolCallId", () => {
+    const call = parseRunnerMessage(
+      '{"type":"tool_call","sessionId":"s1","toolCallId":"tc1","toolName":"Read","display":"x"}',
+    );
+    assert.equal(call.type, "tool_call");
+    const result = parseRunnerMessage(
+      '{"type":"tool_result","sessionId":"s1","toolCallId":"tc1","content":"x"}',
+    );
+    assert.equal(result.type, "tool_result");
+  });
 });
 
 describe("serialize", () => {

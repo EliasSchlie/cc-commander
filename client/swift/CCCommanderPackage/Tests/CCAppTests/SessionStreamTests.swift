@@ -7,59 +7,42 @@ import Foundation
 @MainActor
 struct SessionStreamTests {
 
-    // Prevents: streaming text not coalesced into a single entry, view re-layouts on every token
-    @Test func appendTextCoalescesIntoSingleAssistantEntry() {
+    // Prevents: streaming text not accumulated, user sees nothing
+    @Test func appendTextAccumulatesPendingText() {
         let stream = SessionStream(sessionId: "s1")
         stream.appendText("Hello ")
         stream.appendText("world")
-        #expect(stream.entries.count == 1)
-        if case .assistantText(_, let text) = stream.entries[0] {
-            #expect(text == "Hello world")
-        } else {
-            Issue.record("Expected assistantText")
-        }
+        #expect(stream.pendingText == "Hello world")
+        #expect(stream.entries.isEmpty) // not flushed yet
     }
 
-    // Prevents: stream revision not bumped, view can't observe text growth
-    @Test func appendTextBumpsStreamRevision() {
-        let stream = SessionStream(sessionId: "s1")
-        let before = stream.streamRevision
-        stream.appendText("Hi")
-        stream.appendText(" there")
-        #expect(stream.streamRevision == before &+ 2)
-    }
-
-    // Prevents: tool call merging into the previous assistantText entry, ordering broken
-    @Test func toolCallEndsAssistantTextRun() {
+    // Prevents: tool call appears after text instead of flushing text first
+    @Test func addToolCallFlushesPendingText() {
         let stream = SessionStream(sessionId: "s1")
         stream.appendText("Some text")
         stream.addToolCall(toolCallId: "tc1", toolName: "Read", display: "Reading file")
-        stream.appendText("More text")
-        #expect(stream.entries.count == 3)
+        #expect(stream.pendingText.isEmpty)
+        #expect(stream.entries.count == 2)
         if case .assistantText(_, let text) = stream.entries[0] {
             #expect(text == "Some text")
         } else {
-            Issue.record("Expected assistantText[0]")
+            Issue.record("Expected assistantText")
         }
-        if case .toolCall(_, let tcId, let name, _, _) = stream.entries[1] {
+        if case .toolCall(_, let tcId, let name, let display, _) = stream.entries[1] {
             #expect(tcId == "tc1")
             #expect(name == "Read")
+            #expect(display == "Reading file")
         } else {
-            Issue.record("Expected toolCall[1]")
-        }
-        if case .assistantText(_, let text) = stream.entries[2] {
-            #expect(text == "More text")
-        } else {
-            Issue.record("Expected assistantText[2]")
+            Issue.record("Expected toolCall")
         }
     }
 
-    // Prevents: tool result attached by position, parallel tool calls misattribute
+    // Prevents: tool result attached by position, parallel tool calls misattribute (#9)
     @Test func toolResultMatchesByToolCallId() {
         let stream = SessionStream(sessionId: "s1")
         stream.addToolCall(toolCallId: "A", toolName: "Read", display: "A")
         stream.addToolCall(toolCallId: "B", toolName: "Read", display: "B")
-        // Result for A arrives AFTER B was emitted -- this is the parallel-tool-calls scenario
+        // Result for A arrives AFTER B was emitted -- the parallel-tool-calls scenario
         stream.addToolResult(toolCallId: "A", content: "result-A")
         stream.addToolResult(toolCallId: "B", content: "result-B")
 
@@ -77,33 +60,40 @@ struct SessionStreamTests {
         }
     }
 
-    // Prevents: tool result with unknown id crashes
-    @Test func addToolResultWithUnknownIdIsNoOp() {
+    // Prevents: tool result with unknown id silently mutating wrong entry
+    @Test func addToolResultWithUnknownIdIsIgnored() {
         let stream = SessionStream(sessionId: "s1")
-        stream.addToolResult(toolCallId: "ghost", content: "orphan result")
-        #expect(stream.entries.isEmpty)
+        stream.addToolCall(toolCallId: "real", toolName: "Read", display: "x")
+        stream.addToolResult(toolCallId: "ghost", content: "orphan")
+        if case .toolCall(_, _, _, _, let result) = stream.entries[0] {
+            #expect(result == nil)
+        } else {
+            Issue.record("Expected toolCall")
+        }
     }
 
-    // Prevents: turn boundary doesn't advance, new turn's tool calls render as past
-    @Test func flushTurnAdvancesCurrentTurnStartIndex() {
+    // Prevents: turn end doesn't flush text or advance turn boundary
+    @Test func flushTurnFlushesPendingTextAndAdvancesTurn() {
         let stream = SessionStream(sessionId: "s1")
         stream.appendText("Response text")
         stream.addToolCall(toolCallId: "t1", toolName: "Read", display: "Read file")
         stream.appendText("More text")
-        #expect(stream.currentTurnStartIndex == 0)
 
         stream.flushTurn()
-        #expect(stream.currentTurnStartIndex == stream.entries.count)
+
+        #expect(stream.pendingText.isEmpty)
         // Should have: assistantText, toolCall, assistantText
         #expect(stream.entries.count == 3)
+        #expect(stream.currentTurnStartIndex == stream.entries.count)
 
-        // Subsequent text starts a new entry, not appended to the previous turn
-        stream.appendText("New turn")
+        // A new turn appends past the boundary
+        stream.appendText("New turn text")
+        stream.flushTurn()
         #expect(stream.entries.count == 4)
     }
 
-    // Prevents: user prompt not stored
-    @Test func setPendingPromptStores() {
+    // Prevents: user prompt not stored, user never sees the question
+    @Test func setPendingPromptFlushesPendingText() {
         let stream = SessionStream(sessionId: "s1")
         stream.appendText("Before prompt")
         let prompt = UserPromptPayload(
@@ -111,8 +101,9 @@ struct SessionStreamTests {
             questions: [UserPromptQuestion(question: "Which option?")]
         )
         stream.setPendingPrompt(prompt)
+        #expect(stream.pendingText.isEmpty)
         #expect(stream.pendingPrompt?.promptId == "p1")
-        #expect(stream.entries.count == 1) // the assistantText still there
+        #expect(stream.entries.count == 1) // flushed text
     }
 
     // Prevents: clearing prompt doesn't record what the user chose
@@ -142,13 +133,13 @@ struct SessionStreamTests {
         }
     }
 
-    // Prevents: error after open assistant text gets merged into it
-    @Test func errorBreaksAssistantTextRun() {
+    // Prevents: error in middle of streaming text loses the text
+    @Test func errorFlushesPendingText() {
         let stream = SessionStream(sessionId: "s1")
         stream.appendText("Working")
         stream.addError("Boom")
-        stream.appendText("Recovering")
-        #expect(stream.entries.count == 3)
+        #expect(stream.pendingText.isEmpty)
+        #expect(stream.entries.count == 2)
     }
 
     // Prevents: history not loaded from opaque SDK messages
