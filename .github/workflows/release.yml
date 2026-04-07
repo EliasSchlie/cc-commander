@@ -1,15 +1,27 @@
 name: Release
 
-# Builds and publishes the hub Docker image to GHCR on:
-#   - Every push to main → tag `:main` and `:sha-<short>` (so runners
-#     pick up new commits within their poll interval)
-#   - Every `v*` tag → tag `:<version>` and `:latest` (immutable releases)
+# Builds, publishes, and (on main) deploys the hub Docker image.
 #
-# The runner self-update flow only needs the Docker image to exist with
-# a fresh VERSION baked in; runners do `git pull` of the runner repo on
-# their own. So this workflow does not deploy to any VPS — that step
-# stays manual / per-operator. Add an SSH-deploy job here if/when you
-# decide to automate it.
+#   - Every push to main → tag `:main` and `:sha-<short>`, then SSH
+#     to the VPS and `docker compose up -d --build`. Runners pick up
+#     the new VERSION via /api/version within their poll interval.
+#   - Every `v*` tag → tag `:<version>` and `:latest` (immutable
+#     releases). Tags do NOT auto-deploy: an operator should pull the
+#     versioned image intentionally.
+#
+# The deploy job is opt-in: it only runs if the DEPLOY_SSH_HOST secret
+# is set. Without it, the workflow stops after pushing the image and
+# the legacy "ssh in and deploy by hand" flow still works.
+#
+# Required secrets for auto-deploy (Repo Settings → Secrets → Actions):
+#   DEPLOY_SSH_HOST   — VPS hostname (e.g. cc-commander.eliasschlie.com)
+#   DEPLOY_SSH_USER   — SSH user (e.g. root, deploy, ubuntu)
+#   DEPLOY_SSH_KEY    — private key (the matching pubkey lives in
+#                       ~/.ssh/authorized_keys on the VPS)
+# Optional secrets:
+#   DEPLOY_SSH_PORT   — defaults to 22
+#   DEPLOY_HUB_DIR    — path to the cc-commander/hub checkout on the
+#                       VPS (defaults to ~/cc-commander/hub)
 
 on:
   push:
@@ -45,6 +57,8 @@ jobs:
     name: Build & push hub image
     runs-on: ubuntu-latest
     needs: test
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
     steps:
       - uses: actions/checkout@v4
 
@@ -116,3 +130,88 @@ jobs:
               exit 1
           fi
           echo "OK: image VERSION=$BAKED"
+
+  deploy-hub:
+    name: Deploy hub to VPS
+    runs-on: ubuntu-latest
+    needs: hub-image
+    # Tag pushes are immutable releases an operator should pull
+    # intentionally; only auto-deploy on main.
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - name: Skip if deploy host not configured
+        id: gate
+        env:
+          DEPLOY_SSH_HOST: ${{ secrets.DEPLOY_SSH_HOST }}
+        run: |
+          if [ -z "$DEPLOY_SSH_HOST" ]; then
+              echo "DEPLOY_SSH_HOST not set -- skipping deploy. Set the"
+              echo "DEPLOY_SSH_HOST/USER/KEY secrets to enable auto-deploy."
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+              echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: SSH deploy
+        if: steps.gate.outputs.skip != 'true'
+        uses: appleboy/ssh-action@v1.2.0
+        env:
+          DEPLOY_HUB_DIR: ${{ secrets.DEPLOY_HUB_DIR }}
+        with:
+          host: ${{ secrets.DEPLOY_SSH_HOST }}
+          username: ${{ secrets.DEPLOY_SSH_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_SSH_PORT || 22 }}
+          # 5 minute window: covers a cold rebuild incl. npm ci.
+          # Hub builds in ~90s on a typical VPS so this is generous.
+          command_timeout: 5m
+          # Pass the directory secret through to the remote shell so
+          # it isn't substituted into the script body (keeps it out of
+          # CI logs even if logging the script is later enabled).
+          envs: DEPLOY_HUB_DIR
+          script: |
+            set -euo pipefail
+            HUB_DIR="${DEPLOY_HUB_DIR:-$HOME/cc-commander/hub}"
+            cd "$HUB_DIR"
+
+            # `git reset --hard origin/main` (not `pull`) so a deploy
+            # always lands the exact tree CI just built. A merged PR
+            # may have conflicting local changes if an operator was
+            # poking around on the box; refuse to silently merge
+            # those into prod.
+            git fetch origin main
+            git reset --hard origin/main
+
+            # `--build` (not `pull`) is intentional: the compose file
+            # uses a `build:` directive to bake the VERSION ARG from
+            # the checked-out tree. Layer cache makes this fast.
+            docker compose up -d --build
+
+            # Tear down dangling layers so a long-running VPS doesn't
+            # accumulate one stale image per deploy.
+            docker image prune -f
+
+      - name: Verify deployed VERSION
+        if: steps.gate.outputs.skip != 'true'
+        env:
+          EXPECTED: ${{ needs.hub-image.outputs.version }}
+          HOST: ${{ secrets.DEPLOY_SSH_HOST }}
+        run: |
+          # The SSH deploy doesn't tell us when the new container is
+          # ready to serve traffic. Poll /api/version against the
+          # public hostname until we see the SHA we just built, or
+          # bail after ~90s. Catches the "deploy succeeded but the
+          # proxy is still routing to the old container" case.
+          URL="https://${HOST}/api/version"
+          for i in $(seq 1 30); do
+              GOT="$(curl -fsS "$URL" 2>/dev/null | sed -n 's/.*"version":"\([^"]*\)".*/\1/p' || true)"
+              if [ "$GOT" = "$EXPECTED" ]; then
+                  echo "OK: $URL serves $GOT"
+                  exit 0
+              fi
+              echo "attempt $i: got '$GOT', want '$EXPECTED'"
+              sleep 3
+          done
+          echo "::error::deployed hub never reported expected VERSION=$EXPECTED"
+          curl -fsS "$URL" || true
+          exit 1
