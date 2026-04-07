@@ -42,7 +42,11 @@ struct CCCommanderApp: App {
                     // If a command channel is configured, hand control over
                     // to the test harness and skip the regular launch path.
                     // The harness owns startListening + login + everything
-                    // else from this point on.
+                    // else from this point on. The harness's `startSession`
+                    // takes `directory` as a required parameter, so the
+                    // CC_COMMANDER_TEST_DIR validation that previously
+                    // lived inline is no longer necessary -- the type
+                    // system enforces it at the API boundary.
                     if let cmdFile = ProcessInfo.processInfo.environment["CC_COMMANDER_CMD_FILE"], !cmdFile.isEmpty {
                         CCLog.info("App", "test command channel active", ["cmdFile": .string(cmdFile)])
                         let harness = TestHarness(appState: appState)

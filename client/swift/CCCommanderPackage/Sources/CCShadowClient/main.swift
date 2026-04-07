@@ -96,7 +96,11 @@ func runShadow() async {
 
     // Optional: drive a session if asked
     if let prompt = env["CC_COMMANDER_TEST_PROMPT"], !prompt.isEmpty {
-        let dir = env["CC_COMMANDER_TEST_DIR"] ?? "/tmp"
+        // Required: a default would silently leave session rows in the shared hub DB.
+        guard let dir = env["CC_COMMANDER_TEST_DIR"], !dir.isEmpty else {
+            print("[shadow] FAIL: CC_COMMANDER_TEST_DIR not set")
+            exit(1)
+        }
         let target = appState.onlineMachines[0]
         print("[shadow] starting session on \(target.name) dir=\(dir)")
         let knownIds = Set(appState.sessions.map(\.sessionId))

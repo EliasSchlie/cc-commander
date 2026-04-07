@@ -56,6 +56,9 @@ export function handleClientMessage(
     case "get_session_history":
       handleGetSessionHistory(ctx, conn, msg);
       break;
+    case "archive_session":
+      handleArchiveSession(ctx, conn, msg);
+      break;
   }
 }
 
@@ -184,6 +187,24 @@ function handleGetSessionHistory(
     sessionId: msg.sessionId,
     requestId,
   });
+}
+
+function handleArchiveSession(
+  ctx: WsContext,
+  conn: ClientConnection,
+  msg: { sessionId: string },
+): void {
+  // Ownership check before archive so phantom/foreign ids get a clear
+  // error rather than a silent no-op.
+  const session = ctx.db.getSessionById(msg.sessionId);
+  if (!session || session.accountId !== conn.accountId) {
+    ctx.sendToClient(conn, { type: "error", message: "Session not found" });
+    return;
+  }
+  const affected = ctx.db.archiveSession(msg.sessionId, conn.accountId);
+  if (affected > 0) {
+    ctx.broadcastSessionList(conn.accountId);
+  }
 }
 
 /** Look up session + verify ownership + find online runner. Sends

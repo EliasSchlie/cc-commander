@@ -1,3 +1,5 @@
+import { statSync } from "node:fs";
+import { isAbsolute } from "node:path";
 import { WebSocket } from "ws";
 import { query, getSessionMessages } from "@anthropic-ai/claude-agent-sdk";
 import { parseHubMessage, serialize } from "@cc-commander/protocol";
@@ -204,6 +206,28 @@ export class MachineRunner {
     prompt: string,
     extra: { cwd?: string; resume?: string },
   ): Promise<void> {
+    // SDK chdir failures surface as "Claude Code executable not found
+    // at .../cli.js" -- catch the bad cwd here so the user sees the
+    // real cause. Done before touching `this.sessions` so a bad-cwd
+    // retry doesn't kill the previously running session for the same
+    // id and doesn't flap the session through running→error.
+    if (extra.cwd !== undefined) {
+      const cwdError = validateCwd(extra.cwd);
+      if (cwdError) {
+        this.log.warn("rejecting bad cwd", {
+          sessionId,
+          cwd: extra.cwd,
+          reason: cwdError,
+        });
+        this.sendToHub({
+          type: "session_error",
+          sessionId,
+          error: cwdError,
+        });
+        return;
+      }
+    }
+
     const existing = this.sessions.get(sessionId);
     if (existing) {
       existing.abortController.abort();
@@ -566,6 +590,24 @@ export class MachineRunner {
       resolver(response);
     }
   }
+}
+
+/** Returns an error string on failure (relative / missing / not a
+ *  directory), or null if `cwd` is safe to hand to the SDK. */
+function validateCwd(cwd: string): string | null {
+  if (!isAbsolute(cwd)) {
+    return `Working directory must be an absolute path (got "${cwd}")`;
+  }
+  let stat;
+  try {
+    stat = statSync(cwd);
+  } catch {
+    return `Working directory does not exist: ${cwd}`;
+  }
+  if (!stat.isDirectory()) {
+    return `Working directory is not a directory: ${cwd}`;
+  }
+  return null;
 }
 
 function rejectPendingPrompts(session: ActiveSession, message: string): void {

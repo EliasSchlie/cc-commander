@@ -6,7 +6,7 @@ import {
   existsSync,
   statSync,
 } from "node:fs";
-import { spawn, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { homedir, hostname } from "node:os";
@@ -287,8 +287,15 @@ async function cmdRun(flags: Record<string, string | boolean>): Promise<void> {
     return false;
   }
 
-  // onUpdateNeeded fires the spawn + exit; needs `updater` declared first
-  // to keep it on its own (never re-entered).
+  // onUpdateNeeded runs update.sh SYNCHRONOUSLY before exiting. The
+  // previous detached-spawn pattern raced launchd's KeepAlive restart
+  // and caused the new runner process to read the OLD git tree before
+  // update.sh's checkout landed (see PR #65 for the full timeline).
+  // Running synchronously means the parent runner is still alive --
+  // and holding the launchd "process is up" state -- while git
+  // checkout + npm ci complete. Only after they finish does the
+  // runner exit, and only then does launchd boot the replacement,
+  // guaranteed against the new tree.
   const updater = new Updater({
     hubBaseUrl: swapWsHttp(cfg.hubUrl, "http"),
     currentVersion,
@@ -298,22 +305,47 @@ async function cmdRun(flags: Record<string, string | boolean>): Promise<void> {
       if (shouldSkipUpdate()) return;
 
       const script = join(RUNNER_REPO_DIR, "scripts", "update.sh");
-      log.info("running update script", { script, hubVersion });
-      const child = spawn("/bin/sh", [script, hubVersion], {
+      log.info("running update script (sync)", { script, hubVersion });
+      // CRITICAL: do not call runner.disconnect() before spawnSync.
+      // disconnect() flips shouldReconnect=false permanently, so on
+      // an update failure (return path below) the runner would stay
+      // alive without a hub connection -- a zombie that launchd
+      // never restarts. Disconnect ONLY on the success path,
+      // immediately before process.exit, so any failure leaves the
+      // runner intact and connected on the OLD tree.
+      //
+      // Side effect: spawnSync blocks the event loop for the
+      // duration of the update (~2-5s typical, longer on cold npm
+      // ci), so the WS heartbeat doesn't run. If the heartbeat
+      // window trips, the hub will see the runner go away briefly
+      // and mark in-flight sessions as errored -- same end state as
+      // an explicit disconnect, no worse.
+      const result = spawnSync("/bin/sh", [script, hubVersion], {
         cwd: RUNNER_REPO_DIR,
-        detached: true,
-        stdio: "ignore",
+        // Inherit stdio so update.sh's npm ci output streams to the
+        // launchd stdout/err log alongside the runner's structured
+        // logs -- a single tail captures both halves of an update.
+        stdio: "inherit",
       });
-      // child.pid is undefined ONLY if spawn failed synchronously
-      // (e.g. /bin/sh missing). The 'error' event would fire async,
-      // after our process.exit, so we'd never see it. Bail loudly here
-      // instead — the runner stays up, the operator sees the error.
-      if (!child.pid) {
-        log.error("failed to spawn update script (no pid); aborting update");
+      if (result.error) {
+        log.error("failed to spawn update script", {
+          err: result.error,
+        });
+        // Runner stays up on OLD tree and OLD hub connection. The
+        // failure marker (written by update.sh on its own failures)
+        // blocks retries during the cooldown window.
         return;
       }
-      child.unref();
-      log.info("exiting for launchd restart");
+      if (result.status !== 0) {
+        log.error("update script exited non-zero", {
+          status: result.status,
+          signal: result.signal ?? null,
+        });
+        return;
+      }
+      log.info("update script complete; exiting for launchd restart", {
+        hubVersion,
+      });
       runner.disconnect();
       process.exit(0);
     },

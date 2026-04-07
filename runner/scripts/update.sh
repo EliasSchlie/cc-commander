@@ -1,13 +1,15 @@
 #!/usr/bin/env sh
-# Self-update script invoked by the runner when it detects a version
-# mismatch with the hub. Runs detached from the runner process; by the
-# time this executes, the runner is exiting. launchd (KeepAlive=true)
-# restarts the runner against the new code.
+# Self-update script invoked SYNCHRONOUSLY by the runner when it
+# detects a version mismatch with the hub. The runner spawns this
+# script via spawnSync and waits for it to complete BEFORE exiting,
+# so by the time launchd's KeepAlive boots a replacement runner, the
+# new tree is already on disk. (Earlier versions ran the script
+# detached and raced launchd's restart -- see PR #65 / PR #67.)
 #
-# Failure handling: on any error, write a marker file the runner reads
-# at startup. The runner skips self-update for UPDATE_COOLDOWN_MS while
-# the marker is fresh, preventing a 30-second restart loop on persistent
-# update failures.
+# Failure handling: on any error, write a marker file the runner
+# reads at startup. The runner skips self-update for
+# UPDATE_COOLDOWN_MS while the marker is fresh, preventing a
+# 30-second restart loop on persistent update failures.
 #
 # Argument: $1 = target version (informational only — git fetch +
 # checkout of origin's default branch is what actually moves the tree).
@@ -28,11 +30,6 @@ mark_failure() {
     echo "ERROR: $1 — wrote failure marker $FAILURE_MARKER" >> "$LOG"
     exit 1
 }
-
-# Give the parent runner a moment to fully exit and release any open
-# files / native module bindings (better-sqlite3 etc.) before we git
-# checkout + npm ci could rewrite them.
-sleep 1
 
 {
     echo "=== $(date '+%Y-%m-%d %H:%M:%S') update → $TARGET ==="
@@ -72,5 +69,6 @@ fi
 rm -f "$FAILURE_MARKER"
 echo "=== update complete ===" >> "$LOG"
 
-# launchd will restart the runner because the parent process exited
-# cleanly with KeepAlive=true. No explicit relaunch needed.
+# Return cleanly to the parent runner. The parent will then exit
+# and launchd's KeepAlive will boot a replacement against the new
+# tree -- guaranteed against the new SHA, no race.

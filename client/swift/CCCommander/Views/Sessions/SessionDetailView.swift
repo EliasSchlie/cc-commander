@@ -9,8 +9,6 @@ struct SessionDetailView: View {
         if let session = appState.selectedSession,
            let stream = appState.selectedSessionStream {
             sessionContent(session: session, stream: stream)
-        } else if appState.selectedSession != nil {
-            ProgressView("Loading session...")
         } else {
             ContentUnavailableView("No Session Selected", systemImage: "terminal")
         }
@@ -63,12 +61,6 @@ struct SessionDetailView: View {
         .toolbar {
             ToolbarItem(placement: .automatic) {
                 StatusBadge(status: session.status)
-            }
-        }
-        .task {
-            // Load history when selecting a session
-            if stream.entries.isEmpty {
-                try? await appState.loadSessionHistory(sessionId: session.sessionId)
             }
         }
     }

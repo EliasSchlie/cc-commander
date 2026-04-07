@@ -140,6 +140,75 @@ describe("connection", () => {
   });
 });
 
+describe("cwd validation", () => {
+  // SDK chdir failures surface as a misleading "Claude Code executable not
+  // found" error -- the runner must catch the bad cwd before invoking the
+  // SDK and never start the underlying query.
+  const cases: Array<{ name: string; directory: string; matches: RegExp }> = [
+    {
+      name: "missing directory",
+      directory: "/this/path/definitely/does/not/exist",
+      matches: /Working directory does not exist/,
+    },
+    {
+      name: "relative path",
+      directory: "relative/path",
+      matches: /absolute path/,
+    },
+    {
+      // /etc/hosts exists on every test box and is a regular file.
+      name: "regular file",
+      directory: "/etc/hosts",
+      matches: /not a directory/,
+    },
+  ];
+
+  for (const { name, directory, matches } of cases) {
+    it(`rejects ${name} and skips the SDK`, async () => {
+      let queryInvoked = false;
+      const runner = new MachineRunner({
+        hubUrl: `ws://localhost:${hubPort}`,
+        registrationToken: "test-token",
+        machineName: "Test",
+        queryFn: ((..._args: unknown[]) => {
+          queryInvoked = true;
+          async function* gen() {}
+          return gen();
+        }) as any,
+      });
+      await runner.connect();
+      await waitForRunnerMsg((m) => m.type === "runner_hello");
+
+      const allMsgs: any[] = [];
+      runnerSocket!.on("message", (data) => {
+        allMsgs.push(JSON.parse(data.toString()));
+      });
+
+      const errPromise = waitForRunnerMsg((m) => m.type === "session_error");
+      sendToRunner({
+        type: "hub_start_session",
+        sessionId: `s-${name}`,
+        directory,
+        prompt: "hi",
+      });
+      const err = await errPromise;
+      assert.match(err.error, matches);
+      assert.equal(queryInvoked, false, "SDK must not be invoked for bad cwd");
+      // No running→error flap: a bad cwd must reject before the
+      // running status is broadcast.
+      assert.equal(
+        allMsgs.find(
+          (m) => m.type === "session_status" && m.status === "running",
+        ),
+        undefined,
+        "running status must not be emitted before cwd validation",
+      );
+
+      runner.disconnect();
+    });
+  }
+});
+
 describe("session lifecycle", () => {
   // Prevents: runner not streaming SDK events to hub
   it("streams text from SDK to hub", async () => {

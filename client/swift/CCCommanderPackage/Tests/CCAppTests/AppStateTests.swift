@@ -134,6 +134,35 @@ struct AppStateTests {
         #expect(state.sessionStreams["s1"]?.pendingText == "ab")
     }
 
+    // Prevents: detail view stuck on a Loading placeholder for idle
+    // sessions because no inbound message ever creates a stream.
+    @Test func selectingSessionEagerlyCreatesStream() {
+        let state = makeAppState()
+        state.handleMessage(.sessionList(makeSessions()))
+        #expect(state.sessionStreams["s1"] == nil)
+        state.selectedSessionId = "s1"
+        #expect(state.sessionStreams["s1"] != nil)
+    }
+
+    // Prevents: detail view pointing at a phantom session after another
+    // client removes the selected row.
+    @Test func sessionListClearsStaleSelection() {
+        let state = makeAppState()
+        state.handleMessage(.sessionList(makeSessions()))
+        state.selectedSessionId = "s1"
+        let remaining = makeSessions().filter { $0.sessionId != "s1" }
+        state.handleMessage(.sessionList(remaining))
+        #expect(state.selectedSessionId == nil)
+    }
+
+    // Prevents: hub error messages being silently dropped instead of
+    // surfaced to the user.
+    @Test func errorMessageSurfacesAsToast() {
+        let state = makeAppState()
+        state.handleMessage(.error(message: "Machine is offline"))
+        #expect(state.lastError?.message == "Machine is offline")
+    }
+
     // Prevents: turn end doesn't flush text or advance turn boundary
     @Test func statusChangeFromRunningTriggersFlushTurn() {
         let state = makeAppState()

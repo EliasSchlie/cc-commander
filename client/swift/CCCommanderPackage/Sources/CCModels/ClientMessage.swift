@@ -7,6 +7,7 @@ public enum ClientMessage: Sendable {
     case respondToPrompt(sessionId: String, promptId: String, response: UserPromptResponse)
     case listSessions
     case getSessionHistory(sessionId: String)
+    case archiveSession(sessionId: String)
     case listMachines
 }
 
@@ -17,6 +18,7 @@ extension ClientMessage: Encodable {
         case respondToPrompt = "respond_to_prompt"
         case listSessions = "list_sessions"
         case getSessionHistory = "get_session_history"
+        case archiveSession = "archive_session"
         case listMachines = "list_machines"
     }
 
@@ -49,6 +51,10 @@ extension ClientMessage: Encodable {
 
         case .getSessionHistory(let sessionId):
             try container.encode(MessageType.getSessionHistory.rawValue, forKey: .type)
+            try container.encode(sessionId, forKey: .sessionId)
+
+        case .archiveSession(let sessionId):
+            try container.encode(MessageType.archiveSession.rawValue, forKey: .type)
             try container.encode(sessionId, forKey: .sessionId)
 
         case .listMachines:

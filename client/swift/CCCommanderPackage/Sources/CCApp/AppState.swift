@@ -6,6 +6,19 @@ import CCNetworking
 
 private let log = CCLog.Logger("AppState")
 
+/// A transient error surfaced from the hub (or a local action) so the UI
+/// can show it to the user instead of swallowing it. Each instance gets
+/// a fresh UUID so SwiftUI's `alert(item:)` re-fires even when two
+/// consecutive errors carry identical text.
+public struct HubErrorToast: Identifiable, Equatable, Sendable {
+    public let id: UUID
+    public let message: String
+    public init(message: String) {
+        self.id = UUID()
+        self.message = message
+    }
+}
+
 /// Canonical app state. Owns the hub connection and holds all sessions/machines.
 @MainActor
 @Observable
@@ -14,8 +27,17 @@ public final class AppState {
 
     public var sessions: [SessionMeta] = []
     public var machines: [MachineInfo] = []
-    public var selectedSessionId: String?
+    public var selectedSessionId: String? {
+        didSet {
+            guard let id = selectedSessionId, oldValue != id else { return }
+            ensureStreamAndLoadHistory(sessionId: id)
+        }
+    }
     public var sessionStreams: [String: SessionStream] = [:]
+
+    /// Most recent hub error, displayed as an alert at the root view and
+    /// cleared on dismiss. Mutated only via `recordError(_:)`.
+    public var lastError: HubErrorToast?
 
     public var isAuthenticated: Bool {
         connection.state == .connected || connection.hasStoredCredentials
@@ -88,15 +110,37 @@ public final class AppState {
         try await connection.requestSessionHistory(sessionId: sessionId)
     }
 
+    public func archiveSession(sessionId: String) async throws {
+        try await connection.archiveSession(sessionId: sessionId)
+    }
+
+    public func recordError(_ message: String) {
+        lastError = HubErrorToast(message: message)
+    }
+
+    private func ensureStreamAndLoadHistory(sessionId: String) {
+        let stream = streamFor(sessionId)
+        guard stream.entries.isEmpty else { return }
+        Task { [weak self] in
+            do {
+                try await self?.loadSessionHistory(sessionId: sessionId)
+            } catch {
+                self?.recordError("Failed to load session history: \(error.localizedDescription)")
+            }
+        }
+    }
+
     // MARK: - Message dispatch
 
     public func handleMessage(_ message: ServerMessage) {
         switch message {
         case .sessionList(let list):
             sessions = list
-            // Evict streams for sessions no longer in the list
             let liveIds = Set(list.map(\.sessionId))
             sessionStreams = sessionStreams.filter { liveIds.contains($0.key) }
+            if let selected = selectedSessionId, !liveIds.contains(selected) {
+                selectedSessionId = nil
+            }
 
         case .machineList(let list):
             log.info("machine_list received", ["count": .int(list.count)])
@@ -141,6 +185,7 @@ public final class AppState {
 
         case .error(let message):
             log.error("hub error", ["message": .string(message)])
+            recordError(message)
         }
     }
 
