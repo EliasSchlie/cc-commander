@@ -67,13 +67,7 @@ struct AppStateTests {
         let state = makeAppState()
         state.handleMessage(.streamText(sessionId: "s1", content: "Hello"))
         state.handleMessage(.streamText(sessionId: "s1", content: " world"))
-        let entries = state.sessionStreams["s1"]?.entries ?? []
-        #expect(entries.count == 1)
-        if case .assistantText(_, let text) = entries.first {
-            #expect(text == "Hello world")
-        } else {
-            Issue.record("Expected assistantText")
-        }
+        #expect(state.sessionStreams["s1"]?.pendingText == "Hello world")
         #expect(state.sessionStreams["s2"] == nil)
     }
 
@@ -137,29 +131,22 @@ struct AppStateTests {
         state.handleMessage(.streamText(sessionId: "s1", content: "a"))
         state.handleMessage(.streamText(sessionId: "s1", content: "b"))
         #expect(state.sessionStreams.count == 1) // only one stream created
-        let entries = state.sessionStreams["s1"]?.entries ?? []
-        if case .assistantText(_, let text) = entries.first {
-            #expect(text == "ab")
-        } else {
-            Issue.record("Expected coalesced assistantText")
-        }
+        #expect(state.sessionStreams["s1"]?.pendingText == "ab")
     }
 
-    // Prevents: turn end doesn't advance turn boundary in stream
+    // Prevents: turn end doesn't flush text or advance turn boundary
     @Test func statusChangeFromRunningTriggersFlushTurn() {
         let state = makeAppState()
         state.handleMessage(.sessionList(makeSessions()))
-        // Simulate a running session with pending text
         let stream = SessionStream(sessionId: "s1")
         stream.status = .running
         stream.appendText("Some output")
         stream.addToolCall(toolCallId: "tc1", toolName: "Bash", display: "Running tests")
         state.sessionStreams["s1"] = stream
-        let entryCountBefore = stream.entries.count
 
         state.handleMessage(.sessionStatus(sessionId: "s1", status: .idle, lastMessagePreview: nil))
 
-        // Turn boundary advanced -- past tool calls now render collapsed
-        #expect(stream.currentTurnStartIndex == entryCountBefore)
+        #expect(stream.pendingText.isEmpty)
+        #expect(stream.currentTurnStartIndex == stream.entries.count)
     }
 }
