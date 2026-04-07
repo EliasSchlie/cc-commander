@@ -16,9 +16,9 @@ struct RootView: View {
             "Hub error",
             isPresented: Binding(
                 get: { appState.lastError != nil },
-                set: { showing in if !showing { appState.lastError = nil } },
+                set: { showing in if !showing { appState.lastError = nil } }
             ),
-            presenting: appState.lastError,
+            presenting: appState.lastError
         ) { _ in
             Button("OK", role: .cancel) { appState.lastError = nil }
         } message: { toast in
