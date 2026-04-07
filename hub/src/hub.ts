@@ -7,13 +7,7 @@ import {
   parseRunnerMessage,
   serialize,
 } from "@cc-commander/protocol";
-import type {
-  ClientToHubMsg,
-  RunnerToHubMsg,
-  HubToRunnerMsg,
-  HubToClientMsg,
-  RespondToPromptMsg,
-} from "@cc-commander/protocol";
+import type { HubToRunnerMsg, HubToClientMsg } from "@cc-commander/protocol";
 import { HUB_METRIC, Metrics } from "@cc-commander/protocol/metrics";
 import type { HubDb } from "./db.ts";
 import type { AuthService, JwtPayload } from "./auth.ts";
@@ -25,6 +19,13 @@ import { handleCreateMachine } from "./routes/machines.ts";
 import { handleHealth, handleVersion } from "./routes/health.ts";
 import type { RouteContext } from "./routes/types.ts";
 import { clientIp, extractBearerToken } from "./util/http.ts";
+import {
+  handleClientMessage,
+  handleListMachines,
+  handleListSessions,
+} from "./ws/clientMessage.ts";
+import { handleRunnerMessage } from "./ws/runnerMessage.ts";
+import type { WsContext } from "./ws/context.ts";
 
 export interface HubConfig {
   port: number;
@@ -320,13 +321,14 @@ export class Hub {
     };
     this.addClient(connectionId, conn);
 
-    this.handleListSessions(conn);
-    this.handleListMachines(conn);
+    const wsCtx = this.wsContext();
+    handleListSessions(wsCtx, conn);
+    handleListMachines(wsCtx, conn);
 
     ws.on("message", (data) => {
       try {
         const msg = parseClientMessage(data.toString());
-        this.handleClientMessage(conn, msg);
+        handleClientMessage(this.wsContext(), conn, msg);
       } catch (err) {
         this.metrics.inc(HUB_METRIC.PARSE_REJECT, { source: "client" });
         this.sendToClient(conn, {
@@ -362,168 +364,6 @@ export class Hub {
     if (bucket.size === 0) this.clientsByAccount.delete(conn.accountId);
   }
 
-  private handleClientMessage(
-    conn: ClientConnection,
-    msg: ClientToHubMsg,
-  ): void {
-    switch (msg.type) {
-      case "list_sessions":
-        this.handleListSessions(conn);
-        break;
-      case "list_machines":
-        this.handleListMachines(conn);
-        break;
-      case "start_session":
-        this.handleStartSession(conn, msg);
-        break;
-      case "send_prompt":
-        this.handleSendPrompt(conn, msg);
-        break;
-      case "respond_to_prompt":
-        this.handleRespondToPrompt(conn, msg);
-        break;
-      case "get_session_history":
-        this.handleGetSessionHistory(conn, msg);
-        break;
-    }
-  }
-
-  private handleListSessions(conn: ClientConnection): void {
-    const sessions = this.config.db.listSessionsForAccount(conn.accountId);
-    this.sendToClient(conn, { type: "session_list", sessions });
-  }
-
-  private handleListMachines(conn: ClientConnection): void {
-    this.sendToClient(conn, {
-      type: "machine_list",
-      machines: this.enrichedMachineList(conn.accountId),
-    });
-  }
-
-  private handleStartSession(
-    conn: ClientConnection,
-    msg: { machineId: string; directory: string; prompt: string },
-  ): void {
-    if (!isSafeDirectory(msg.directory)) {
-      this.sendToClient(conn, {
-        type: "error",
-        message:
-          "Invalid directory: must be an absolute path without parent-segment traversal",
-      });
-      return;
-    }
-    const runnerConn = this.runners.get(msg.machineId);
-    if (!runnerConn) {
-      this.sendToClient(conn, { type: "error", message: "Machine is offline" });
-      return;
-    }
-    if (runnerConn.accountId !== conn.accountId) {
-      this.sendToClient(conn, { type: "error", message: "Machine not found" });
-      return;
-    }
-
-    const session = this.config.db.createSession(
-      conn.accountId,
-      msg.machineId,
-      msg.directory,
-      "running",
-    );
-
-    this.sendToRunner(runnerConn, {
-      type: "hub_start_session",
-      sessionId: session.id,
-      directory: msg.directory,
-      prompt: msg.prompt,
-    });
-
-    this.broadcastSessionList(conn.accountId);
-  }
-
-  private handleSendPrompt(
-    conn: ClientConnection,
-    msg: { sessionId: string; prompt: string },
-  ): void {
-    const result = this.resolveSessionRunner(conn, msg.sessionId);
-    if (!result) return;
-    this.config.db.updateSessionStatus(result.session.id, "running");
-    this.sendToRunner(result.runnerConn, {
-      type: "hub_send_prompt",
-      sessionId: msg.sessionId,
-      prompt: msg.prompt,
-    });
-  }
-
-  private handleRespondToPrompt(
-    conn: ClientConnection,
-    msg: RespondToPromptMsg,
-  ): void {
-    const result = this.resolveSessionRunner(conn, msg.sessionId);
-    if (!result) return;
-    this.sendToRunner(result.runnerConn, {
-      type: "hub_respond_to_prompt",
-      sessionId: msg.sessionId,
-      promptId: msg.promptId,
-      response: msg.response,
-    });
-  }
-
-  private handleGetSessionHistory(
-    conn: ClientConnection,
-    msg: { sessionId: string },
-  ): void {
-    const result = this.resolveSessionRunner(conn, msg.sessionId);
-    if (!result) return;
-    const requestId = randomUUID();
-    // Bound map growth and unblock the client: a runner that stays
-    // connected but never replies (deadlock, dropped message, bug)
-    // would otherwise leave the client spinning forever waiting on
-    // its requestId. The store fires the onExpire callback exactly
-    // once if the TTL elapses before take() is called.
-    this.pendingHistory.add(
-      requestId,
-      { conn, machineId: result.runnerConn.machineId },
-      (expired) => {
-        this.metrics.inc(HUB_METRIC.HISTORY_TTL_EXPIRED);
-        console.warn(
-          `[hub] session_history TTL expired for request ${requestId} on machine ${expired.machineId}`,
-        );
-        this.sendToClient(expired.conn, {
-          type: "session_history",
-          sessionId: msg.sessionId,
-          requestId,
-          messages: [],
-          error: "timeout",
-        });
-      },
-    );
-    this.sendToRunner(result.runnerConn, {
-      type: "hub_get_history",
-      sessionId: msg.sessionId,
-      requestId,
-    });
-  }
-
-  /** Look up session + verify ownership + find online runner. Sends error to client and returns null on failure. */
-  private resolveSessionRunner(
-    conn: ClientConnection,
-    sessionId: string,
-  ): {
-    session: import("./db.ts").SessionRow;
-    runnerConn: RunnerConnection;
-  } | null {
-    const session = this.config.db.getSessionById(sessionId);
-    if (!session || session.accountId !== conn.accountId) {
-      this.sendToClient(conn, { type: "error", message: "Session not found" });
-      return null;
-    }
-    const runnerConn = this.runners.get(session.machineId);
-    if (!runnerConn) {
-      this.sendToClient(conn, { type: "error", message: "Machine is offline" });
-      return null;
-    }
-    return { session, runnerConn };
-  }
-
   // ── Runner connections ─────────────────────────────────────────────────
 
   private handleRunnerConnection(ws: WebSocket, url: URL): void {
@@ -556,7 +396,7 @@ export class Hub {
     ws.on("message", (data) => {
       try {
         const msg = parseRunnerMessage(data.toString());
-        this.handleRunnerMessage(conn, msg);
+        handleRunnerMessage(this.wsContext(), conn, msg);
       } catch (err) {
         this.metrics.inc(HUB_METRIC.PARSE_REJECT, { source: "runner" });
         console.error("Invalid runner message:", err);
@@ -582,95 +422,27 @@ export class Hub {
     });
   }
 
-  private handleRunnerMessage(
-    conn: RunnerConnection,
-    msg: RunnerToHubMsg,
-  ): void {
-    switch (msg.type) {
-      case "runner_hello":
-        conn.machineName = msg.machineName;
-        break;
-
-      case "stream_text":
-      case "tool_call":
-      case "tool_result":
-      case "user_prompt":
-        this.relayToClients(conn.accountId, msg);
-        break;
-
-      case "session_history": {
-        // Peek (not take) so a machineId mismatch leaves the entry in
-        // the store for the legitimate runner's eventual reply.
-        const pending = this.pendingHistory.peek(msg.requestId);
-        if (!pending) {
-          // Either expired (TTL fired) or fabricated by a misbehaving
-          // runner. Either way: do not broadcast unsolicited history to
-          // every client on the account.
-          this.metrics.inc(HUB_METRIC.HISTORY_ORPHAN_REPLY);
-          console.warn(
-            `[hub] dropping session_history with unknown requestId from machine ${conn.machineId}`,
-          );
-          break;
-        }
-        if (pending.machineId !== conn.machineId) {
-          // The runner that replied isn't the one we asked. Drop.
-          this.metrics.inc(HUB_METRIC.HISTORY_ORPHAN_REPLY);
-          console.warn(
-            `[hub] session_history reply machineId mismatch (expected ${pending.machineId}, got ${conn.machineId})`,
-          );
-          break;
-        }
-        this.pendingHistory.take(msg.requestId);
-        if (msg.error) {
-          // Operators want degraded-fetch rate as much as orphan rate.
-          // The error code is from A1's closed set, so cardinality is
-          // bounded by the union (timeout|no_session|fetch_failed).
-          this.metrics.inc(HUB_METRIC.HISTORY_DEGRADED, { code: msg.error });
-        }
-        this.sendToClient(pending.conn, msg);
-        break;
-      }
-
-      case "session_status":
-        this.config.db.updateSessionStatus(
-          msg.sessionId,
-          msg.status,
-          msg.lastMessagePreview,
-        );
-        this.relayToClients(conn.accountId, msg);
-        break;
-
-      case "session_done":
-        this.config.db.updateSessionStatus(msg.sessionId, "idle");
-        if (msg.sdkSessionId) {
-          this.config.db.updateSessionSdkId(msg.sessionId, msg.sdkSessionId);
-        }
-        this.relayToClients(conn.accountId, msg);
-        this.broadcastSessionList(conn.accountId);
-        break;
-
-      case "session_error":
-        this.config.db.updateSessionStatus(msg.sessionId, "error", msg.error);
-        this.relayToClients(conn.accountId, msg);
-        this.broadcastSessionList(conn.accountId);
-        break;
-
-      case "dropped_tool_block":
-        // Pure observability signal: SDK shape drift surfaced by the
-        // runner-side guards. The labels are closed-set thanks to A1's
-        // parser validation, so cardinality is bounded.
-        this.metrics.inc(HUB_METRIC.DROPPED_TOOL_BLOCK, {
-          block_type: msg.blockType,
-          reason: msg.reason,
-        });
-        console.warn(
-          `[hub] dropped_tool_block machine=${conn.machineId} session=${msg.sessionId} block=${msg.blockType} reason=${msg.reason}`,
-        );
-        break;
-    }
-  }
-
   // ── Helpers ───────────────────────────────────────────────────────────
+
+  /**
+   * Build the WebSocket dispatch context. Closing over `this` keeps
+   * Hub internals private; the literal is allocated per dispatch but
+   * is cheap (8 field references and a handful of bound methods).
+   */
+  private wsContext(): WsContext {
+    return {
+      db: this.config.db,
+      metrics: this.metrics,
+      pendingHistory: this.pendingHistory,
+      runners: this.runners,
+      sendToClient: (conn, msg) => this.sendToClient(conn, msg),
+      sendToRunner: (conn, msg) => this.sendToRunner(conn, msg),
+      relayToClients: (accountId, msg) => this.relayToClients(accountId, msg),
+      broadcastSessionList: (accountId) => this.broadcastSessionList(accountId),
+      broadcastMachineList: (accountId) => this.broadcastMachineList(accountId),
+      enrichedMachineList: (accountId) => this.enrichedMachineList(accountId),
+    };
+  }
 
   private sendToClient(conn: ClientConnection, msg: HubToClientMsg): void {
     if (conn.ws.readyState === WebSocket.OPEN) {
@@ -709,22 +481,4 @@ export class Hub {
       .listMachinesForAccount(accountId)
       .map((m) => ({ ...m, online: this.runners.has(m.machineId) }));
   }
-}
-
-/**
- * Validates a directory path supplied by a client. Must be a non-empty
- * absolute POSIX path with no parent-segment traversal (`..`) and no NUL
- * bytes. The runner is still responsible for ensuring the path actually
- * exists and is accessible — this is a defence-in-depth check on the hub.
- */
-function isSafeDirectory(dir: unknown): dir is string {
-  if (typeof dir !== "string" || dir.length === 0 || dir.length > 4096) {
-    return false;
-  }
-  if (!dir.startsWith("/")) return false;
-  if (dir.includes("\0")) return false;
-  for (const segment of dir.split("/")) {
-    if (segment === "..") return false;
-  }
-  return true;
 }
