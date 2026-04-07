@@ -72,5 +72,22 @@ fi
 rm -f "$FAILURE_MARKER"
 echo "=== update complete ===" >> "$LOG"
 
+# Race window: when the parent runner exited (back at the top of this
+# script), launchd restarted it almost immediately -- well before our
+# `sleep 1 && git checkout` could land the new tree. The new launchd
+# child therefore booted against the OLD tree and is now reporting
+# the OLD git SHA via /api/version. Force a SECOND restart so launchd
+# boots a fresh runner against the now-updated tree. macOS-only:
+# Linux runners would need an analogous systemd `restart` here.
+LAUNCHD_LABEL="com.cc-commander.runner"
+if command -v launchctl >/dev/null 2>&1; then
+    UID_NUM="$(id -u)"
+    if launchctl print "gui/${UID_NUM}/${LAUNCHD_LABEL}" >/dev/null 2>&1; then
+        echo "kickstarting ${LAUNCHD_LABEL} for second restart" >> "$LOG"
+        launchctl kickstart -k "gui/${UID_NUM}/${LAUNCHD_LABEL}" >> "$LOG" 2>&1 || \
+            echo "WARN: launchctl kickstart failed" >> "$LOG"
+    fi
+fi
+
 # launchd will restart the runner because the parent process exited
 # cleanly with KeepAlive=true. No explicit relaunch needed.
