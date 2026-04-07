@@ -2,6 +2,7 @@ import { WebSocket } from "ws";
 import { query, getSessionMessages } from "@anthropic-ai/claude-agent-sdk";
 import { parseHubMessage, serialize } from "@cc-commander/protocol";
 import { Metrics, RUNNER_METRIC } from "@cc-commander/protocol/metrics";
+import { createLogger, type Logger } from "@cc-commander/protocol/logger";
 import type {
   DroppedToolBlockMsg,
   HubToRunnerMsg,
@@ -52,6 +53,8 @@ export interface RunnerConfig {
   getSessionMessagesFn?: GetSessionMessagesFn;
   /** Inject a Metrics instance (mostly for tests). */
   metrics?: Metrics;
+  /** Inject a Logger (mostly for tests). */
+  logger?: Logger;
 }
 
 export class MachineRunner {
@@ -64,6 +67,7 @@ export class MachineRunner {
   queryFn: QueryFn;
   getSessionMessagesFn: GetSessionMessagesFn;
   metrics: Metrics;
+  log: Logger;
 
   constructor(config: RunnerConfig) {
     this.config = config;
@@ -76,6 +80,9 @@ export class MachineRunner {
     this.getSessionMessagesFn =
       config.getSessionMessagesFn || getSessionMessages;
     this.metrics = config.metrics ?? new Metrics();
+    this.log =
+      config.logger ??
+      createLogger("runner", { machineName: config.machineName });
   }
 
   connect(): Promise<void> {
@@ -90,9 +97,7 @@ export class MachineRunner {
 
       this.ws.on("open", () => {
         connected = true;
-        console.log(
-          `[runner] Connected to hub as "${this.config.machineName}"`,
-        );
+        this.log.info("connected to hub");
         this.sendToHub({
           type: "runner_hello",
           machineName: this.config.machineName,
@@ -106,23 +111,32 @@ export class MachineRunner {
           this.handleMessage(msg);
         } catch (err) {
           this.metrics.inc(RUNNER_METRIC.PARSE_REJECT);
-          console.error("[runner] Invalid message from hub:", err);
+          this.log.error("invalid message from hub", { err: err as Error });
         }
       });
 
       this.ws.on("close", () => {
-        console.log("[runner] Disconnected from hub");
+        // Always log -- silent disconnects were one of the worst
+        // debugging gaps. Tag with whether we had ever connected
+        // (initial-connect failure vs mid-session drop) so an
+        // operator can tell them apart at a glance.
+        this.log.warn("disconnected from hub", {
+          everConnected: connected,
+          willReconnect: connected && this.shouldReconnect,
+        });
         if (connected && this.shouldReconnect) {
           const delay = this.config.reconnectIntervalMs ?? 5000;
-          console.log(`[runner] Reconnecting in ${delay}ms...`);
+          this.log.info("scheduling reconnect", { delayMs: delay });
           this.reconnectTimer = setTimeout(() => {
-            this.connect().catch(console.error);
+            this.connect().catch((e) =>
+              this.log.error("reconnect failed", { err: e as Error }),
+            );
           }, delay);
         }
       });
 
       this.ws.on("error", (err) => {
-        console.error("[runner] WebSocket error:", err.message);
+        this.log.error("WebSocket error", { message: err.message });
         if (!connected) reject(err);
       });
     });
@@ -153,9 +167,8 @@ export class MachineRunner {
   }
 
   private handleMessage(msg: HubToRunnerMsg): void {
-    console.log(
-      `[runner] handleMessage type=${msg.type}${"sessionId" in msg ? ` sessionId=${(msg as any).sessionId}` : ""}`,
-    );
+    const sessionId = "sessionId" in msg ? (msg as any).sessionId : undefined;
+    this.log.debug("handle hub message", { msgType: msg.type, sessionId });
     switch (msg.type) {
       case "hub_start_session":
         this.runSession(msg.sessionId, msg.prompt, { cwd: msg.directory });
@@ -170,7 +183,9 @@ export class MachineRunner {
         this.getHistory(msg.sessionId, msg.requestId);
         break;
       default:
-        console.warn(`[runner] unhandled message type: ${(msg as any).type}`);
+        this.log.warn("unhandled hub message type", {
+          msgType: (msg as any).type,
+        });
     }
   }
 
@@ -206,9 +221,15 @@ export class MachineRunner {
     };
     this.sessions.set(sessionId, session);
     this.sendToHub({ type: "session_status", sessionId, status: "running" });
-    console.log(
-      `[runner] runSession start sid=${sessionId} cwd=${extra.cwd ?? "<none>"} resume=${extra.resume ?? "<none>"} promptLen=${prompt.length}`,
-    );
+    // Per-session child logger so a single grep on `sessionId=<id>`
+    // reconstructs the full request trace across hub→runner→SDK
+    // boundaries. Cheap (one extra Map allocation per session start).
+    const slog = this.log.child({ sessionId });
+    slog.info("session start", {
+      cwd: extra.cwd ?? null,
+      resume: extra.resume ?? null,
+      promptLen: prompt.length,
+    });
 
     let promptCounter = 0;
     let streamCount = 0;
@@ -237,23 +258,23 @@ export class MachineRunner {
       if (extra.cwd) options.cwd = extra.cwd;
       if (extra.resume) options.resume = extra.resume;
 
-      console.log(`[runner] runSession sid=${sessionId} invoking SDK query()`);
+      slog.debug("invoking SDK query()");
       for await (const msg of this.queryFn({ prompt, options })) {
         streamCount++;
         if (streamCount <= 5 || streamCount % 20 === 0) {
-          console.log(
-            `[runner] sid=${sessionId} sdk msg #${streamCount} type=${(msg as any).type}`,
-          );
+          slog.debug("sdk message", {
+            seq: streamCount,
+            msgType: (msg as any).type,
+          });
         }
         this.processStreamMessage(msg, session);
       }
-      console.log(
-        `[runner] runSession sid=${sessionId} SDK query() complete after ${streamCount} msgs`,
-      );
+      slog.info("session complete", { streamCount });
     } catch (err) {
-      console.error(
-        `[runner] runSession sid=${sessionId} threw after ${streamCount} msgs: ${err instanceof Error ? err.stack || err.message : String(err)}`,
-      );
+      slog.error("session threw", {
+        streamCount,
+        err: err as Error,
+      });
       if (!abortController.signal.aborted) {
         this.sendToHub({
           type: "session_error",
@@ -262,9 +283,7 @@ export class MachineRunner {
         });
       }
     } finally {
-      console.log(
-        `[runner] runSession sid=${sessionId} cleanup (sdkSessionId=${session.sdkSessionId})`,
-      );
+      slog.debug("session cleanup", { sdkSessionId: session.sdkSessionId });
       if (session.sdkSessionId) {
         // Evict oldest entry if at capacity
         if (this.sdkSessionIds.size >= MAX_SDK_SESSION_IDS) {
@@ -510,9 +529,12 @@ export class MachineRunner {
       block_type: payload.blockType,
       reason: payload.reason,
     });
-    console.error(
-      `[runner] dropped ${payload.blockType} (${payload.reason}): ${JSON.stringify(raw).slice(0, 200)}`,
-    );
+    this.log.error("dropped tool block", {
+      sessionId,
+      blockType: payload.blockType,
+      reason: payload.reason,
+      sample: JSON.stringify(raw).slice(0, 200),
+    });
     this.sendToHub({
       type: "dropped_tool_block",
       sessionId,
