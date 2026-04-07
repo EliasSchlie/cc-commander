@@ -580,6 +580,72 @@ describe("runner disconnect cleanup", () => {
   });
 });
 
+// ── Per-account relay index ─────────────────────────────────────────────
+
+describe("per-account relay index", () => {
+  // #22: relay must NOT iterate every connected client. Two accounts
+  // connected to the same hub: a stream_text from one account's
+  // session must reach only that account's clients, with the other
+  // account's client seeing nothing.
+  it("does not relay account A messages to account B clients", async () => {
+    const a = await auth.register("a@test.com", "pw");
+    const b = await auth.register("b@test.com", "pw");
+    const accountA = db.getAccountByEmail("a@test.com")!;
+    const machineA = db.createMachine(accountA.id, "ma");
+    const sessionA = db.createSession(accountA.id, machineA.id, "/tmp", "idle");
+
+    const runnerA = await connectRunner(machineA.registrationToken);
+    const clientA = await connectClient(a.token);
+    const clientB = await connectClient(b.token);
+    await new Promise((r) => setTimeout(r, 100));
+
+    const bMessages: any[] = [];
+    clientB.on("message", (data) =>
+      bMessages.push(JSON.parse(data.toString())),
+    );
+
+    const aSawText = waitForMsg(
+      clientA,
+      (m) => m.type === "stream_text" && m.content === "hello",
+    );
+    runnerA.send(
+      JSON.stringify({
+        type: "stream_text",
+        sessionId: sessionA.id,
+        content: "hello",
+      }),
+    );
+    await aSawText;
+
+    // Give B a moment to (incorrectly) receive the relay.
+    await new Promise((r) => setTimeout(r, 50));
+    assert.equal(
+      bMessages.find((m) => m.type === "stream_text"),
+      undefined,
+      "account B must not see account A's stream_text",
+    );
+
+    await closeWs(clientA);
+    await closeWs(clientB);
+    await closeWs(runnerA);
+  });
+
+  // #22: secondary index must drop empty buckets so a one-shot account
+  // doesn't permanently grow the map. Verified via reflection on the
+  // private map size.
+  it("clientsByAccount drops empty buckets on disconnect", async () => {
+    const a = await auth.register("a@test.com", "pw");
+    const clientA = await connectClient(a.token);
+    await new Promise((r) => setTimeout(r, 50));
+    const idx = (hub as unknown as { clientsByAccount: Map<string, unknown> })
+      .clientsByAccount;
+    assert.equal(idx.size, 1);
+    await closeWs(clientA);
+    await new Promise((r) => setTimeout(r, 100));
+    assert.equal(idx.size, 0);
+  });
+});
+
 // ── Pending history request cleanup ─────────────────────────────────────
 
 describe("pending history cleanup", () => {

@@ -75,6 +75,13 @@ export interface HubConfig {
 export class Hub {
   config: HubConfig;
   clients: Map<string, ClientConnection>;
+  /**
+   * Secondary index of connections by account, kept in lockstep with
+   * `clients`. relayToClients walks ONLY the relevant account's set
+   * instead of every connected client, so a stream-text token from
+   * one user no longer pays for every other user on the hub.
+   */
+  private clientsByAccount: Map<string, Set<ClientConnection>>;
   runners: Map<string, RunnerConnection>;
   /** Per-request TTL store for in-flight get_session_history calls. */
   pendingHistory: PendingHistoryStore;
@@ -97,6 +104,7 @@ export class Hub {
   constructor(config: HubConfig) {
     this.config = config;
     this.clients = new Map();
+    this.clientsByAccount = new Map();
     this.runners = new Map();
     this.pendingHistory = new PendingHistoryStore(
       // Default lives on the store; pass through only if explicitly set.
@@ -203,6 +211,8 @@ export class Hub {
       this.metrics.stop();
       for (const [, conn] of this.clients) conn.ws.close();
       for (const [, conn] of this.runners) conn.ws.close();
+      this.clients.clear();
+      this.clientsByAccount.clear();
       this.pendingHistory.clear();
       this.wss.close(() => {
         this.httpServer.close((err) => (err ? reject(err) : resolve()));
@@ -308,7 +318,7 @@ export class Hub {
       accountId: payload.accountId,
       email: payload.email,
     };
-    this.clients.set(connectionId, conn);
+    this.addClient(connectionId, conn);
 
     this.handleListSessions(conn);
     this.handleListMachines(conn);
@@ -327,9 +337,29 @@ export class Hub {
     });
 
     ws.on("close", () => {
-      this.clients.delete(connectionId);
+      this.removeClient(connectionId, conn);
       this.pendingHistory.dropMatching((entry) => entry.conn === conn);
     });
+  }
+
+  private addClient(connectionId: string, conn: ClientConnection): void {
+    this.clients.set(connectionId, conn);
+    let bucket = this.clientsByAccount.get(conn.accountId);
+    if (!bucket) {
+      bucket = new Set();
+      this.clientsByAccount.set(conn.accountId, bucket);
+    }
+    bucket.add(conn);
+  }
+
+  private removeClient(connectionId: string, conn: ClientConnection): void {
+    this.clients.delete(connectionId);
+    const bucket = this.clientsByAccount.get(conn.accountId);
+    if (!bucket) return;
+    bucket.delete(conn);
+    // Drop the account bucket entirely once empty so the secondary
+    // index doesn't grow forever for one-shot accounts.
+    if (bucket.size === 0) this.clientsByAccount.delete(conn.accountId);
   }
 
   private handleClientMessage(
@@ -655,11 +685,9 @@ export class Hub {
   }
 
   private relayToClients(accountId: string, msg: HubToClientMsg): void {
-    for (const [, conn] of this.clients) {
-      if (conn.accountId === accountId) {
-        this.sendToClient(conn, msg);
-      }
-    }
+    const bucket = this.clientsByAccount.get(accountId);
+    if (!bucket) return;
+    for (const conn of bucket) this.sendToClient(conn, msg);
   }
 
   private broadcastSessionList(accountId: string): void {
