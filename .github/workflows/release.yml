@@ -157,6 +157,7 @@ jobs:
         uses: appleboy/ssh-action@v1.2.0
         env:
           DEPLOY_HUB_DIR: ${{ secrets.DEPLOY_HUB_DIR }}
+          NEW_VERSION: ${{ needs.hub-image.outputs.version }}
         with:
           host: ${{ secrets.DEPLOY_SSH_HOST }}
           username: ${{ secrets.DEPLOY_SSH_USER }}
@@ -165,10 +166,11 @@ jobs:
           # 5 minute window: covers a cold rebuild incl. npm ci.
           # Hub builds in ~90s on a typical VPS so this is generous.
           command_timeout: 5m
-          # Pass the directory secret through to the remote shell so
-          # it isn't substituted into the script body (keeps it out of
-          # CI logs even if logging the script is later enabled).
-          envs: DEPLOY_HUB_DIR
+          # Pass NEW_VERSION + DEPLOY_HUB_DIR through to the remote
+          # shell so they aren't substituted into the script body
+          # (keeps them out of CI logs even if logging the script is
+          # later enabled).
+          envs: DEPLOY_HUB_DIR,NEW_VERSION
           script: |
             set -euo pipefail
             HUB_DIR="${DEPLOY_HUB_DIR:-$HOME/cc-commander/hub}"
@@ -182,10 +184,31 @@ jobs:
             git fetch origin main
             git reset --hard origin/main
 
+            # docker-compose.yml passes VERSION through to the
+            # container's runtime env (`VERSION: ${VERSION:-}`), and
+            # /api/version reports whatever the container sees at
+            # runtime -- NOT the value the Dockerfile baked in at
+            # build time. So we have to update .env so docker compose
+            # picks up the new SHA, otherwise the post-deploy verify
+            # step polls forever for a SHA the container will never
+            # report.
+            #
+            # Idempotent: replace existing VERSION= line, or append if
+            # missing. The sed delimiter is `|` (not `/`) so a SHA
+            # never collides with the delimiter.
+            if grep -q '^VERSION=' .env; then
+                sed -i.bak "s|^VERSION=.*|VERSION=${NEW_VERSION}|" .env
+            else
+                echo "VERSION=${NEW_VERSION}" >> .env
+            fi
+            rm -f .env.bak
+
             # `--build` (not `pull`) is intentional: the compose file
-            # uses a `build:` directive to bake the VERSION ARG from
-            # the checked-out tree. Layer cache makes this fast.
-            docker compose up -d --build
+            # uses a `build:` directive. Layer cache makes the rebuild
+            # fast. `--force-recreate` so the container picks up the
+            # new VERSION env from .env even when the image hash
+            # didn't change (e.g. doc-only commits).
+            docker compose up -d --build --force-recreate
 
             # Tear down dangling layers so a long-running VPS doesn't
             # accumulate one stale image per deploy.
