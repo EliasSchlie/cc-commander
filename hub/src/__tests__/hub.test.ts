@@ -737,4 +737,57 @@ describe("session_history reply routing", () => {
     await closeWs(clientWs);
     await closeWs(runnerWs);
   });
+
+  // Prevents: a second runner on the same account replying to a pending
+  // history request that was actually directed at the first runner
+  it("drops session_history when the replying machineId doesn't match", async () => {
+    const tokens = await auth.register("user@test.com", "pass");
+    const account = db.getAccountByEmail("user@test.com")!;
+    const machineA = db.createMachine(account.id, "A");
+    const machineB = db.createMachine(account.id, "B");
+    const sessionOnA = db.createSession(
+      account.id,
+      machineA.id,
+      "/tmp",
+      "idle",
+    );
+
+    const runnerA = await connectRunner(machineA.registrationToken);
+    const runnerB = await connectRunner(machineB.registrationToken);
+    const clientWs = await connectClient(tokens.token);
+    await new Promise((r) => setTimeout(r, 100));
+
+    // Capture the requestId the hub sends to runnerA
+    const aSawRequest = new Promise<any>((resolve) => {
+      runnerA.once("message", (data) => resolve(JSON.parse(data.toString())));
+    });
+    send(clientWs, { type: "get_session_history", sessionId: sessionOnA.id });
+    const req = await aSawRequest;
+    assert.equal(req.type, "hub_get_history");
+    const stolenRequestId = req.requestId;
+
+    let received = false;
+    clientWs.on("message", (data) => {
+      const m = JSON.parse(data.toString());
+      if (m.type === "session_history") received = true;
+    });
+
+    // Runner B replies with the requestId that was sent to runner A
+    runnerB.send(
+      JSON.stringify({
+        type: "session_history",
+        sessionId: sessionOnA.id,
+        requestId: stolenRequestId,
+        messages: [{ role: "assistant", content: "spoofed" }],
+      }),
+    );
+    await new Promise((r) => setTimeout(r, 150));
+    assert.equal(received, false);
+    // The pending entry should still be there (not consumed by the bogus reply)
+    assert.equal(hub.pendingHistoryRequests.size, 1);
+
+    await closeWs(clientWs);
+    await closeWs(runnerA);
+    await closeWs(runnerB);
+  });
 });

@@ -156,7 +156,11 @@ export function parseHubMessage(data: string): HubToRunnerMsg {
     case "hub_respond_to_prompt": {
       requireFields(msg, ["sessionId", "promptId"]);
       const response = (msg as { response?: unknown }).response;
-      if (typeof response !== "object" || response === null) {
+      if (
+        typeof response !== "object" ||
+        response === null ||
+        Array.isArray(response)
+      ) {
         throw new Error(
           'Invalid hub_respond_to_prompt: missing or invalid "response"',
         );
