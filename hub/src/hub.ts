@@ -17,21 +17,14 @@ import type {
 import { HUB_METRIC, Metrics } from "@cc-commander/protocol/metrics";
 import type { HubDb } from "./db.ts";
 import type { AuthService, JwtPayload } from "./auth.ts";
-import { DuplicateEmailError } from "./auth.ts";
 import { TokenBucketRateLimiter } from "./rate_limit.ts";
-
-interface ClientConnection {
-  ws: WebSocket;
-  accountId: string;
-  email: string;
-}
-
-interface RunnerConnection {
-  ws: WebSocket;
-  machineId: string;
-  accountId: string;
-  machineName: string;
-}
+import { PendingHistoryStore } from "./state/pendingHistory.ts";
+import type { ClientConnection, RunnerConnection } from "./ws/types.ts";
+import { handleAuthEndpoint, handleRefreshEndpoint } from "./routes/auth.ts";
+import { handleCreateMachine } from "./routes/machines.ts";
+import { handleHealth, handleVersion } from "./routes/health.ts";
+import type { RouteContext } from "./routes/types.ts";
+import { clientIp, extractBearerToken } from "./util/http.ts";
 
 export interface HubConfig {
   port: number;
@@ -83,15 +76,8 @@ export class Hub {
   config: HubConfig;
   clients: Map<string, ClientConnection>;
   runners: Map<string, RunnerConnection>;
-  /** Maps requestId -> { client that asked, machineId the request was sent to, expiry timer } */
-  pendingHistoryRequests: Map<
-    string,
-    {
-      conn: ClientConnection;
-      machineId: string;
-      timer: ReturnType<typeof setTimeout>;
-    }
-  >;
+  /** Per-request TTL store for in-flight get_session_history calls. */
+  pendingHistory: PendingHistoryStore;
   httpServer: ReturnType<typeof createServer>;
   wss: WebSocketServer;
   loginLimiter: TokenBucketRateLimiter;
@@ -112,7 +98,10 @@ export class Hub {
     this.config = config;
     this.clients = new Map();
     this.runners = new Map();
-    this.pendingHistoryRequests = new Map();
+    this.pendingHistory = new PendingHistoryStore(
+      // Default lives on the store; pass through only if explicitly set.
+      config.historyRequestTtlMs,
+    );
 
     const login = config.rateLimits?.login ?? { capacity: 5, perMinute: 5 };
     // Capacity 3 (not 1) so that legitimate users behind shared NAT
@@ -214,10 +203,7 @@ export class Hub {
       this.metrics.stop();
       for (const [, conn] of this.clients) conn.ws.close();
       for (const [, conn] of this.runners) conn.ws.close();
-      for (const [, entry] of this.pendingHistoryRequests) {
-        clearTimeout(entry.timer);
-      }
-      this.pendingHistoryRequests.clear();
+      this.pendingHistory.clear();
       this.wss.close(() => {
         this.httpServer.close((err) => (err ? reject(err) : resolve()));
       });
@@ -226,201 +212,57 @@ export class Hub {
 
   // ── REST API ──────────────────────────────────────────────────────────
 
+  /**
+   * Build the route context once per request. Closing over `this` keeps
+   * all of Hub's internals private (rate limiters, db, broadcast helper)
+   * while routes/ stays decoupled from the Hub class. The literal is
+   * cheap; allocating per request avoids any hidden lifetime coupling
+   * with stop/restart.
+   */
+  private routeContext(): RouteContext {
+    return {
+      auth: this.config.auth,
+      db: this.config.db,
+      metrics: this.metrics,
+      loginLimiter: this.loginLimiter,
+      registerLimiter: this.registerLimiter,
+      refreshLimiter: this.refreshLimiter,
+      machineCreateLimiter: this.machineCreateLimiter,
+      machineCreateIpLimiter: this.machineCreateIpLimiter,
+      broadcastMachineList: (accountId) => this.broadcastMachineList(accountId),
+      version: this.config.version ?? "",
+    };
+  }
+
   private async handleHttp(
     req: IncomingMessage,
     res: ServerResponse,
   ): Promise<void> {
     const url = new URL(req.url || "/", `http://localhost:${this.config.port}`);
-
     res.setHeader("Content-Type", "application/json");
+    const ctx = this.routeContext();
 
     if (req.method === "POST" && url.pathname === "/api/auth/register") {
-      return this.handleAuthEndpoint(req, res, "register");
+      return handleAuthEndpoint(ctx, req, res, "register");
     }
     if (req.method === "POST" && url.pathname === "/api/auth/login") {
-      return this.handleAuthEndpoint(req, res, "login");
+      return handleAuthEndpoint(ctx, req, res, "login");
     }
     if (req.method === "POST" && url.pathname === "/api/auth/refresh") {
-      return this.handleRefreshEndpoint(req, res);
+      return handleRefreshEndpoint(ctx, req, res);
     }
     if (req.method === "POST" && url.pathname === "/api/machines") {
-      return this.handleCreateMachine(req, res);
+      return handleCreateMachine(ctx, req, res);
     }
     if (req.method === "GET" && url.pathname === "/api/health") {
-      res.writeHead(200);
-      res.end(JSON.stringify({ status: "ok" }));
-      return;
+      return handleHealth(ctx, req, res);
     }
     if (req.method === "GET" && url.pathname === "/api/version") {
-      res.writeHead(200);
-      res.end(JSON.stringify({ version: this.config.version ?? "" }));
-      return;
+      return handleVersion(ctx, req, res);
     }
 
     res.writeHead(404);
     res.end(JSON.stringify({ error: "Not found" }));
-  }
-
-  private async handleAuthEndpoint(
-    req: IncomingMessage,
-    res: ServerResponse,
-    action: "register" | "login",
-  ): Promise<void> {
-    const ip = clientIp(req);
-    const limiter =
-      action === "register" ? this.registerLimiter : this.loginLimiter;
-    if (!limiter.tryConsume(ip)) {
-      this.metrics.inc(HUB_METRIC.RATE_LIMITED, { limiter: action });
-      res.writeHead(429);
-      res.end(JSON.stringify({ error: "Too many requests" }));
-      return;
-    }
-    try {
-      const body = await readBody(req);
-      const { email, password } = body;
-      if (!email || !password) {
-        res.writeHead(400);
-        res.end(JSON.stringify({ error: "email and password required" }));
-        return;
-      }
-      const tokens =
-        action === "register"
-          ? await this.config.auth.register(email, password)
-          : await this.config.auth.login(email, password);
-      res.writeHead(200);
-      res.end(JSON.stringify(tokens));
-    } catch (err) {
-      const isConflict =
-        action === "register" && err instanceof DuplicateEmailError;
-      res.writeHead(isConflict ? 409 : 401);
-      res.end(JSON.stringify({ error: (err as Error).message }));
-    }
-  }
-
-  private async handleRefreshEndpoint(
-    req: IncomingMessage,
-    res: ServerResponse,
-  ): Promise<void> {
-    if (!this.refreshLimiter.tryConsume(clientIp(req))) {
-      this.metrics.inc(HUB_METRIC.RATE_LIMITED, { limiter: "refresh" });
-      res.writeHead(429);
-      res.end(JSON.stringify({ error: "Too many requests" }));
-      return;
-    }
-    try {
-      const body = await readBody(req);
-      if (!body.refreshToken) {
-        res.writeHead(400);
-        res.end(JSON.stringify({ error: "refreshToken required" }));
-        return;
-      }
-      const tokens = await this.config.auth.refresh(body.refreshToken);
-      res.writeHead(200);
-      res.end(JSON.stringify(tokens));
-    } catch (err) {
-      res.writeHead(401);
-      res.end(JSON.stringify({ error: (err as Error).message }));
-    }
-  }
-
-  private async handleCreateMachine(
-    req: IncomingMessage,
-    res: ServerResponse,
-  ): Promise<void> {
-    const token = extractBearerToken(req);
-    let payload: JwtPayload;
-    try {
-      if (!token) throw new Error("Unauthorized");
-      payload = this.config.auth.verifyToken(token);
-    } catch {
-      res.writeHead(401);
-      res.end(JSON.stringify({ error: "Unauthorized" }));
-      return;
-    }
-
-    // Two-layer check: per-account (existing) catches rapid abuse from
-    // a single user; per-IP (new) catches multi-account abuse from one
-    // source. Both layers consume independently so the tokens reflect
-    // attempts, not survivors -- a wasted token regenerates at the
-    // configured rate either way.
-    const accountOk = this.machineCreateLimiter.tryConsume(payload.accountId);
-    const ipOk = this.machineCreateIpLimiter.tryConsume(clientIp(req));
-    if (!accountOk || !ipOk) {
-      // Label which layer rejected so operators can tell single-user
-      // abuse from multi-account abuse from one IP. If both layers
-      // rejected on the same call, "machine_account" wins (per-account
-      // is the user-visible quota and the more specific signal).
-      this.metrics.inc(HUB_METRIC.RATE_LIMITED, {
-        limiter: !accountOk ? "machine_account" : "machine_ip",
-      });
-      res.writeHead(429);
-      res.end(JSON.stringify({ error: "Too many machines created recently" }));
-      return;
-    }
-
-    let name: string;
-    try {
-      const body = await readBody(req);
-      name = typeof body.name === "string" ? body.name.trim() : "";
-    } catch (err) {
-      res.writeHead(400);
-      res.end(JSON.stringify({ error: (err as Error).message }));
-      return;
-    }
-    if (!name) {
-      res.writeHead(400);
-      res.end(JSON.stringify({ error: "name required" }));
-      return;
-    }
-    if (name.length > MAX_MACHINE_NAME_LEN) {
-      res.writeHead(400);
-      res.end(
-        JSON.stringify({
-          error: `name must be ${MAX_MACHINE_NAME_LEN} characters or fewer`,
-        }),
-      );
-      return;
-    }
-
-    try {
-      const machine = this.config.db.createMachine(payload.accountId, name);
-      res.writeHead(201);
-      res.end(
-        JSON.stringify({
-          machineId: machine.id,
-          name: machine.name,
-          registrationToken: machine.registrationToken,
-        }),
-      );
-      this.broadcastMachineList(payload.accountId);
-    } catch (err) {
-      console.error("[hub] createMachine failed:", err);
-      res.writeHead(500);
-      res.end(JSON.stringify({ error: "Internal error" }));
-    }
-  }
-
-  /** Removes pending history request entries matching the predicate. Cancels their TTL timers. */
-  private dropPendingHistoryFor(
-    predicate: (entry: {
-      conn: ClientConnection;
-      machineId: string;
-    }) => boolean,
-  ): void {
-    if (this.pendingHistoryRequests.size === 0) return;
-    for (const [requestId, entry] of this.pendingHistoryRequests) {
-      if (predicate(entry)) {
-        clearTimeout(entry.timer);
-        this.pendingHistoryRequests.delete(requestId);
-      }
-    }
-  }
-
-  private deletePendingHistory(requestId: string): void {
-    const entry = this.pendingHistoryRequests.get(requestId);
-    if (!entry) return;
-    clearTimeout(entry.timer);
-    this.pendingHistoryRequests.delete(requestId);
   }
 
   // ── WebSocket ─────────────────────────────────────────────────────────
@@ -486,7 +328,7 @@ export class Hub {
 
     ws.on("close", () => {
       this.clients.delete(connectionId);
-      this.dropPendingHistoryFor((entry) => entry.conn === conn);
+      this.pendingHistory.dropMatching((entry) => entry.conn === conn);
     });
   }
 
@@ -605,29 +447,25 @@ export class Hub {
     // Bound map growth and unblock the client: a runner that stays
     // connected but never replies (deadlock, dropped message, bug)
     // would otherwise leave the client spinning forever waiting on
-    // its requestId.
-    const timer = setTimeout(() => {
-      const pending = this.pendingHistoryRequests.get(requestId);
-      if (!pending) return;
-      this.pendingHistoryRequests.delete(requestId);
-      this.metrics.inc(HUB_METRIC.HISTORY_TTL_EXPIRED);
-      console.warn(
-        `[hub] session_history TTL expired for request ${requestId} on machine ${pending.machineId}`,
-      );
-      this.sendToClient(pending.conn, {
-        type: "session_history",
-        sessionId: msg.sessionId,
-        requestId,
-        messages: [],
-        error: "timeout",
-      });
-    }, this.config.historyRequestTtlMs ?? PENDING_HISTORY_TTL_MS);
-    timer.unref();
-    this.pendingHistoryRequests.set(requestId, {
-      conn,
-      machineId: result.runnerConn.machineId,
-      timer,
-    });
+    // its requestId. The store fires the onExpire callback exactly
+    // once if the TTL elapses before take() is called.
+    this.pendingHistory.add(
+      requestId,
+      { conn, machineId: result.runnerConn.machineId },
+      (expired) => {
+        this.metrics.inc(HUB_METRIC.HISTORY_TTL_EXPIRED);
+        console.warn(
+          `[hub] session_history TTL expired for request ${requestId} on machine ${expired.machineId}`,
+        );
+        this.sendToClient(expired.conn, {
+          type: "session_history",
+          sessionId: msg.sessionId,
+          requestId,
+          messages: [],
+          error: "timeout",
+        });
+      },
+    );
     this.sendToRunner(result.runnerConn, {
       type: "hub_get_history",
       sessionId: msg.sessionId,
@@ -703,7 +541,9 @@ export class Hub {
           "Runner disconnected",
         );
         // Reply will never come from a disconnected runner.
-        this.dropPendingHistoryFor((entry) => entry.machineId === machine.id);
+        this.pendingHistory.dropMatching(
+          (entry) => entry.machineId === machine.id,
+        );
         this.broadcastMachineList(machine.accountId);
         if (affected > 0) {
           this.broadcastSessionList(machine.accountId);
@@ -729,7 +569,9 @@ export class Hub {
         break;
 
       case "session_history": {
-        const pending = this.pendingHistoryRequests.get(msg.requestId);
+        // Peek (not take) so a machineId mismatch leaves the entry in
+        // the store for the legitimate runner's eventual reply.
+        const pending = this.pendingHistory.peek(msg.requestId);
         if (!pending) {
           // Either expired (TTL fired) or fabricated by a misbehaving
           // runner. Either way: do not broadcast unsolicited history to
@@ -748,7 +590,7 @@ export class Hub {
           );
           break;
         }
-        this.deletePendingHistory(msg.requestId);
+        this.pendingHistory.take(msg.requestId);
         if (msg.error) {
           // Operators want degraded-fetch rate as much as orphan rate.
           // The error code is from A1's closed set, so cardinality is
@@ -841,38 +683,6 @@ export class Hub {
   }
 }
 
-const BEARER_PREFIX = "Bearer ";
-
-/**
- * Best-effort client IP. Falls back to "unknown" so a missing socket
- * address still ends up rate-limited (under one shared bucket) instead
- * of bypassing the limiter entirely. Does NOT trust X-Forwarded-For:
- * the hub currently has no proxy-trust config, and trusting that header
- * unconditionally would let any caller spoof their bucket key.
- */
-function clientIp(req: IncomingMessage): string {
-  const raw = req.socket.remoteAddress ?? "unknown";
-  // Normalize IPv4-mapped IPv6 (::ffff:1.2.3.4 → 1.2.3.4) so the same
-  // attacker connecting over both stacks lands in the same bucket. Same
-  // for IPv6 loopback (::1) which we map to 127.0.0.1 to match localhost
-  // tests and reverse proxies that forward over IPv4.
-  if (raw.startsWith("::ffff:")) return raw.slice("::ffff:".length);
-  if (raw === "::1") return "127.0.0.1";
-  return raw;
-}
-
-function extractBearerToken(req: IncomingMessage): string | null {
-  const header = req.headers["authorization"];
-  if (typeof header !== "string" || !header.startsWith(BEARER_PREFIX)) {
-    return null;
-  }
-  return header.slice(BEARER_PREFIX.length);
-}
-
-const MAX_BODY_BYTES = 1024 * 1024; // 1MB
-const MAX_MACHINE_NAME_LEN = 128;
-const PENDING_HISTORY_TTL_MS = 30_000;
-
 /**
  * Validates a directory path supplied by a client. Must be a non-empty
  * absolute POSIX path with no parent-segment traversal (`..`) and no NUL
@@ -889,29 +699,4 @@ function isSafeDirectory(dir: unknown): dir is string {
     if (segment === "..") return false;
   }
   return true;
-}
-
-function readBody(req: IncomingMessage): Promise<any> {
-  return new Promise((resolve, reject) => {
-    const chunks: Buffer[] = [];
-    let size = 0;
-    req.on("data", (chunk: string | Buffer) => {
-      const buf = typeof chunk === "string" ? Buffer.from(chunk) : chunk;
-      size += buf.byteLength;
-      if (size > MAX_BODY_BYTES) {
-        req.destroy();
-        reject(new Error("Request body too large"));
-        return;
-      }
-      chunks.push(buf);
-    });
-    req.on("end", () => {
-      try {
-        resolve(JSON.parse(Buffer.concat(chunks).toString("utf8")));
-      } catch {
-        reject(new Error("Invalid JSON body"));
-      }
-    });
-    req.on("error", (err) => reject(err));
-  });
 }
