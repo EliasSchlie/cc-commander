@@ -150,13 +150,17 @@ cd client/swift
 APP=$(./scripts/build-app.sh)
 echo "Using $APP"
 
-# 2. Launch with the harness env vars. Run the executable directly --
-#    `open` doesn't propagate env vars cleanly.
+# 2. Launch with the harness env vars. Run the Mach-O executable
+#    directly (NOT `open`) so the env vars propagate. The Keychain
+#    ACL is keyed on the .app's code-signature identity, not on the
+#    launch path -- verified empirically that direct exec keeps
+#    `hasStoredCredentials: true` without prompting, as long as the
+#    binary is signed (build-app.sh enforces this).
 LOG_FILE=/tmp/ccc-gui.log \
 CC_COMMANDER_CMD_FILE=/tmp/ccc-gui.cmd \
 "$APP/Contents/MacOS/CCCommander" &
 
-# 4. Drive it the same way as ccc-shadow.
+# 3. Drive it the same way as ccc-shadow.
 tail -F /tmp/ccc-gui.log | grep harness_ &
 cat <<'EOF' >> /tmp/ccc-gui.cmd
 {"id":"1","cmd":"snapshot"}
@@ -164,6 +168,23 @@ cat <<'EOF' >> /tmp/ccc-gui.cmd
 {"id":"3","cmd":"quit"}
 EOF
 ```
+
+### Collaborative debugging mode
+
+The harness and SwiftUI manipulate **the same `@MainActor AppState`**.
+When you launch with `CC_COMMANDER_CMD_FILE` set, the runner loop yields
+the main actor every 100 ms via `Task.sleep`, so the GUI window keeps
+rendering and accepting clicks **at the same time** the harness is
+ready to dispatch commands. Result: the user clicks around in the
+window AND the agent appends commands to `$CC_COMMANDER_CMD_FILE`, and
+both observe the same shared state in real time.
+
+This is the recommended way to drive a worktree-built instance during
+interactive debugging: a Claude Code session reads the log file to see
+what the user just clicked, and the user sees agent-issued commands
+take effect in the visible UI. The runner only exits on an explicit
+`quit` command, so the GUI remains alive across an arbitrary number
+of agent interactions.
 
 If the app prompts you for a keychain password on launch, **stop** —
 that means the binary's code signature changed since the JWT was
@@ -193,20 +214,25 @@ tail -F /tmp/ccc.log | grep harness_
 
 # Terminal C — script the whole loop. Note the `id` on every line:
 # response records carry the same id so you can match them deterministically.
+# IMPORTANT: the `MACHINE_ID` and `SESSION_ID` placeholders below are
+# NOT valid JSON. A real controller reads them out of the previous
+# response's `result` field and substitutes them at runtime; pasting
+# this block as-is will produce JSON parse errors from the runner.
 cat <<'EOF' >> /tmp/ccc.cmd
 {"id":"1","cmd":"login","args":{"email":"you@example.com","password":"secret"}}
 {"id":"2","cmd":"waitForBootstrap","args":{"timeout":10}}
 {"id":"3","cmd":"snapshot"}
-{"id":"4","cmd":"startSession","args":{"machineId":"<from snapshot>","directory":"/Users/you/projects/foo","prompt":"Run the tests"}}
-{"id":"5","cmd":"waitForSessionStatus","args":{"sessionId":"<from response 4>","statuses":["idle","error"],"timeout":120}}
+{"id":"4","cmd":"startSession","args":{"machineId":"MACHINE_ID","directory":"/Users/you/projects/foo","prompt":"Run the tests"}}
+{"id":"5","cmd":"waitForSessionStatus","args":{"sessionId":"SESSION_ID","statuses":["idle","error"],"timeout":120}}
 {"id":"6","cmd":"snapshot"}
 {"id":"7","cmd":"quit"}
 EOF
 ```
 
+`MACHINE_ID` comes from the `machines[].machineId` field in response 3.
 `startSession` returns `{sessionId: "..."}` in its `result`, so a
 real driver script reads that out of `harness_response` for `id:"4"`
-and substitutes it into `id:"5"`'s args.
+and substitutes it into `id:"5"`'s args as `SESSION_ID`.
 
 ## Legacy env-var smoke test
 
