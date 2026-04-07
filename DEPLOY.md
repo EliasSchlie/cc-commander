@@ -80,6 +80,28 @@ within 5 minutes**. No per-runner intervention.
 If the hub's `VERSION` is empty (e.g. local dev hub), runners skip the
 self-update protocol entirely.
 
+### One-time migration: pre-workspace runner hosts
+
+If you installed a runner **before** the protocol-extraction
+refactor (PR #42), your local clone has `runner/package-lock.json`
+and a `runner/node_modules/` directory. The first self-update against
+post-#42 main will fail because the new `runner/scripts/update.sh`
+expects to install at the workspace root.
+
+On each runner host, run **once** after pulling the new tree:
+
+```sh
+cd cc-commander
+git pull
+rm -f runner/package-lock.json
+rm -rf runner/node_modules hub/node_modules
+npm install
+launchctl unload ~/Library/LaunchAgents/com.cc-commander.runner.plist
+launchctl load   ~/Library/LaunchAgents/com.cc-commander.runner.plist
+```
+
+After that one manual step, future self-updates work normally.
+
 ### Reverse proxy (Caddy example)
 
 Caddy is the easiest because it gets TLS automatically:
