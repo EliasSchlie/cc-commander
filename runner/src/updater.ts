@@ -64,18 +64,29 @@ export class Updater {
    * this from the scheduled timer; tests call it directly.
    */
   async checkOnce(): Promise<"matched" | "skipped" | "update"> {
+    let res: Response;
+    try {
+      res = await this.fetchFn(this.versionUrl);
+    } catch (err) {
+      console.error(`[updater] /api/version request failed: ${String(err)}`);
+      return "skipped";
+    }
+    if (!res.ok) {
+      console.error(`[updater] /api/version returned HTTP ${res.status}`);
+      return "skipped";
+    }
     let hubVersion: string;
     try {
-      const res = await this.fetchFn(this.versionUrl);
-      if (!res.ok) {
-        console.error(`[updater] hub /api/version returned ${res.status}`);
-        return "skipped";
-      }
       const data = (await res.json()) as { version?: unknown };
       hubVersion = typeof data.version === "string" ? data.version : "";
+      if (typeof data.version !== "string") {
+        console.warn(
+          `[updater] /api/version body has no string "version" field; got ${typeof data.version}`,
+        );
+      }
     } catch (err) {
       console.error(
-        `[updater] hub /api/version request failed: ${String(err)}`,
+        `[updater] /api/version returned non-JSON body: ${String(err)}`,
       );
       return "skipped";
     }

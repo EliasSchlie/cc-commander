@@ -48,6 +48,14 @@ sed \
 launchctl unload "$TARGET_PLIST" 2>/dev/null || true
 launchctl load "$TARGET_PLIST"
 
+# launchctl exits 0 even when load actually failed (e.g. plist parse
+# error), so verify the agent is registered before claiming success.
+if ! launchctl list "$PLIST_LABEL" >/dev/null 2>&1; then
+    echo "ERROR: launchctl load reported success but $PLIST_LABEL is not registered" >&2
+    echo "  Inspect ${TARGET_PLIST} and try:  launchctl load -w $TARGET_PLIST" >&2
+    exit 1
+fi
+
 echo "Installed: $TARGET_PLIST"
 echo "Logs:      ~/Library/Logs/cc-commander-runner.log"
 echo "Stop:      launchctl unload $TARGET_PLIST"

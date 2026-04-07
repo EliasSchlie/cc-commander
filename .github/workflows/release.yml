@@ -17,31 +17,50 @@ on:
     tags: ["v*"]
 
 concurrency:
+  # Cancel main-branch builds when a newer one comes in (rapid iteration).
+  # NEVER cancel tag builds — that would leave a tag without its image.
   group: release-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
 
 permissions:
   contents: read
   packages: write
 
 jobs:
-  hub-image:
-    name: Build & push hub image
+  test:
+    name: Hub tests (gate)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
         with:
-          fetch-depth: 0 # need full history for `git describe`
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: hub/package-lock.json
+      - run: npm ci
+        working-directory: hub
+      - run: npm run typecheck
+        working-directory: hub
+      - run: npm test
+        working-directory: hub
+
+  hub-image:
+    name: Build & push hub image
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
 
       - name: Compute VERSION + image tags
         id: meta
+        # VERSION is ALWAYS the full 40-char SHA, regardless of trigger
+        # type. The runner reads its own version from `git rev-parse HEAD`
+        # (also full SHA) and compares with `===`, so the formats must
+        # match exactly. Tags get extra image tags for operator use, but
+        # the auto-update key is the SHA.
         run: |
+          FULL_SHA="$(git rev-parse HEAD)"
           SHORT_SHA="$(git rev-parse --short=12 HEAD)"
-          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
-              VERSION="${GITHUB_REF_NAME}"
-          else
-              VERSION="${SHORT_SHA}"
-          fi
           REPO_LC="$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')"
           IMAGE="ghcr.io/${REPO_LC}-hub"
           TAGS="${IMAGE}:sha-${SHORT_SHA}"
@@ -50,8 +69,8 @@ jobs:
           else
               TAGS="${TAGS},${IMAGE}:main"
           fi
-          echo "Building VERSION=${VERSION}"
-          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Building VERSION=${FULL_SHA}"
+          echo "version=${FULL_SHA}" >> "$GITHUB_OUTPUT"
           {
               echo "tags<<EOF"
               echo "${TAGS}"
@@ -67,6 +86,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build & push
+        id: build
         uses: docker/build-push-action@v6
         with:
           context: ./hub
@@ -77,3 +97,19 @@ jobs:
             VERSION=${{ steps.meta.outputs.version }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      # Verify the runner self-update contract: pull the just-pushed image
+      # and confirm it serves the exact VERSION we baked in. If this drifts
+      # (e.g. someone removes the ARG/ENV from the Dockerfile) the runner
+      # update flow silently breaks because /api/version returns "".
+      - name: Verify VERSION baked into image
+        run: |
+          IMG="$(echo '${{ steps.meta.outputs.tags }}' | head -n1)"
+          docker pull "$IMG"
+          BAKED="$(docker run --rm --entrypoint sh "$IMG" -c 'printf %s "$VERSION"')"
+          EXPECTED='${{ steps.meta.outputs.version }}'
+          if [ "$BAKED" != "$EXPECTED" ]; then
+              echo "::error::VERSION mismatch in image: expected '$EXPECTED' got '$BAKED'"
+              exit 1
+          fi
+          echo "OK: image VERSION=$BAKED"

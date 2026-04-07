@@ -1,5 +1,11 @@
 #!/usr/bin/env node
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
+import {
+  readFileSync,
+  writeFileSync,
+  mkdirSync,
+  existsSync,
+  statSync,
+} from "node:fs";
 import { spawn, spawnSync } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -226,6 +232,33 @@ async function cmdRun(flags: Record<string, string | boolean>): Promise<void> {
   // 5s reconnect window leaves a connect() pending after disconnect().
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
+  // Cooldown marker written by update.sh on failure. If present and
+  // recent, we skip the self-update path entirely so a broken update
+  // (network blip, npm ci failure) does not turn launchd KeepAlive into
+  // a 30-second-interval restart loop.
+  const updateFailureMarker = join(
+    RUNNER_REPO_DIR,
+    ".cc-commander-update-failure",
+  );
+  const UPDATE_COOLDOWN_MS = 30 * 60 * 1000; // 30 min
+
+  function shouldSkipUpdate(): boolean {
+    try {
+      const st = statSync(updateFailureMarker);
+      const ageMs = Date.now() - st.mtimeMs;
+      if (ageMs < UPDATE_COOLDOWN_MS) {
+        const minsLeft = Math.ceil((UPDATE_COOLDOWN_MS - ageMs) / 60000);
+        console.warn(
+          `[updater] previous update failed ${Math.floor(ageMs / 60000)}m ago; cooldown for ${minsLeft}m more (delete ${updateFailureMarker} to retry sooner)`,
+        );
+        return true;
+      }
+    } catch {
+      // marker missing → no recent failure, proceed normally
+    }
+    return false;
+  }
+
   // onUpdateNeeded fires the spawn + exit; needs `updater` declared first
   // to keep it on its own (never re-entered).
   const updater = new Updater({
@@ -234,6 +267,8 @@ async function cmdRun(flags: Record<string, string | boolean>): Promise<void> {
     pollIntervalMs:
       parseInt(process.env.CC_COMMANDER_POLL_MS ?? "", 10) || undefined,
     onUpdateNeeded: (hubVersion) => {
+      if (shouldSkipUpdate()) return;
+
       const script = join(RUNNER_REPO_DIR, "scripts", "update.sh");
       console.log(`[updater] running ${script} → ${hubVersion}`);
       const child = spawn("/bin/sh", [script, hubVersion], {
@@ -241,11 +276,16 @@ async function cmdRun(flags: Record<string, string | boolean>): Promise<void> {
         detached: true,
         stdio: "ignore",
       });
-      child.on("error", (err) => {
+      // child.pid is undefined ONLY if spawn failed synchronously
+      // (e.g. /bin/sh missing). The 'error' event would fire async,
+      // after our process.exit, so we'd never see it. Bail loudly here
+      // instead — the runner stays up, the operator sees the error.
+      if (!child.pid) {
         console.error(
-          `[updater] failed to spawn update script: ${err.message}`,
+          "[updater] failed to spawn update script (no pid); aborting update",
         );
-      });
+        return;
+      }
       child.unref();
       console.log("[updater] exiting for launchd restart");
       runner.disconnect();

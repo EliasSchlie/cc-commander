@@ -38,11 +38,32 @@ if (jwtSecret.length < 32) {
   process.exit(1);
 }
 
-const db = new HubDb(dbPath);
+let db: HubDb;
+try {
+  db = new HubDb(dbPath);
+} catch (err) {
+  console.error(
+    `[hub] FATAL: cannot open database at ${dbPath}: ${(err as Error).message}\n` +
+      `  Check the path is writable and that no other hub process holds the file.`,
+  );
+  process.exit(1);
+}
+
 const auth = new AuthService(db, jwtSecret);
 const hub = new Hub({ port, db, auth, version });
 
-await hub.start();
+try {
+  await hub.start();
+} catch (err) {
+  const msg =
+    (err as NodeJS.ErrnoException).code === "EADDRINUSE"
+      ? `port ${port} is already in use`
+      : (err as Error).message;
+  console.error(`[hub] FATAL: cannot listen on :${port}: ${msg}`);
+  db.close();
+  process.exit(1);
+}
+
 console.log(
   `[hub] listening on :${port} (db=${dbPath === ":memory:" ? "memory" : dbPath}, version=${version || "<unset>"})`,
 );
