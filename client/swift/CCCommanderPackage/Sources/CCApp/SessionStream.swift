@@ -137,9 +137,9 @@ public final class SessionStream {
                 switch type {
                 case "text":
                     if role == "assistant", case .string(let text) = bl["text"], !text.isEmpty {
-                        entries.append(.assistantText(id: UUID().uuidString, text: text))
+                        appendEntry(.assistantText(id: UUID().uuidString, text: text))
                     } else if role == "user", case .string(let text) = bl["text"] {
-                        entries.append(.userMessage(id: UUID().uuidString, text: text))
+                        appendEntry(.userMessage(id: UUID().uuidString, text: text))
                     }
                 case "tool_use":
                     guard case .string(let toolCallId) = bl["id"],

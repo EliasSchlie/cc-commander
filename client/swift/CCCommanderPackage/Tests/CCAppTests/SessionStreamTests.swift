@@ -273,6 +273,29 @@ struct SessionStreamTests {
         #expect(stream.currentTurnStartIndex == 0)
     }
 
+    // Prevents: loadHistory bypassing the entry cap (regression: the
+    // initial #28 PR routed live appends through appendEntry but left
+    // loadHistory's raw entries.append untouched, defeating the cap
+    // for any history payload larger than maxEntries).
+    @Test func loadHistoryRespectsCap() {
+        let stream = SessionStream(sessionId: "s1")
+        let cap = SessionStream.maxEntries
+        var msgs: [AnyCodable] = []
+        for i in 0..<(cap + 100) {
+            msgs.append(.dictionary([
+                "role": .string("user"),
+                "content": .string("m\(i)"),
+            ]))
+        }
+        stream.loadHistory(msgs)
+        #expect(stream.entries.count == cap)
+        if case .userMessage(_, let text) = stream.entries.first {
+            #expect(text == "m100")
+        } else {
+            Issue.record("expected userMessage m100 after eviction")
+        }
+    }
+
     // Prevents: isGenerating not accurate during running status
     @Test func isGeneratingReflectsStatus() {
         let stream = SessionStream(sessionId: "s1")
