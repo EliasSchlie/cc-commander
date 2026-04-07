@@ -605,12 +605,12 @@ describe("pending history cleanup", () => {
     });
     const req = await runnerSawRequest;
     assert.equal(req.type, "hub_get_history");
-    assert.equal(hub.pendingHistoryRequests.size, 1);
+    assert.equal(hub.pendingHistory.size, 1);
 
     // Client disconnects before runner replies. Pending entry must be cleared.
     await closeWs(clientWs);
     await new Promise((r) => setTimeout(r, 100));
-    assert.equal(hub.pendingHistoryRequests.size, 0);
+    assert.equal(hub.pendingHistory.size, 0);
 
     await closeWs(runnerWs);
   });
@@ -653,7 +653,7 @@ describe("pending history cleanup", () => {
     // Degraded reply must carry a stable error code so the client can
     // render e.g. "history unavailable: timeout".
     assert.equal(reply.error, "timeout");
-    assert.equal(hub.pendingHistoryRequests.size, 0);
+    assert.equal(hub.pendingHistory.size, 0);
 
     await closeWs(clientWs);
     await closeWs(runnerWs);
@@ -675,12 +675,12 @@ describe("pending history cleanup", () => {
     });
     send(clientWs, { type: "get_session_history", sessionId: session.id });
     await runnerSawRequest;
-    assert.equal(hub.pendingHistoryRequests.size, 1);
+    assert.equal(hub.pendingHistory.size, 1);
 
     // Runner drops before replying -- entry must be cleared.
     await closeWs(runnerWs);
     await new Promise((r) => setTimeout(r, 100));
-    assert.equal(hub.pendingHistoryRequests.size, 0);
+    assert.equal(hub.pendingHistory.size, 0);
 
     await closeWs(clientWs);
   });
@@ -1376,7 +1376,7 @@ describe("session_history reply routing", () => {
     await new Promise((r) => setTimeout(r, 150));
     assert.equal(received, false);
     // The pending entry should still be there (not consumed by the bogus reply)
-    assert.equal(hub.pendingHistoryRequests.size, 1);
+    assert.equal(hub.pendingHistory.size, 1);
 
     await closeWs(clientWs);
     await closeWs(runnerA);
