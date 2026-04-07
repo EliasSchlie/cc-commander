@@ -18,16 +18,36 @@ public actor WebSocketClient: WebSocketClientProtocol {
     public func connect(request: URLRequest) async throws {
         let task = session.webSocketTask(with: request)
         task.resume()
-        // Send a ping to verify connection is alive
+        // Verify the connection by sending a ping. URLSessionWebSocketTask's
+        // sendPing completion handler is NOT guaranteed to fire — if the
+        // underlying TCP/TLS connection terminates before the pong roundtrip
+        // completes, the closure is silently dropped and the calling Task
+        // hangs forever ("SWIFT TASK CONTINUATION MISUSE: connect(request:)
+        // leaked its continuation"). Race the ping against a timeout so a
+        // stuck callback can't suspend the connect() caller indefinitely.
         do {
-            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-                task.sendPing { error in
-                    if let error {
-                        continuation.resume(throwing: error)
-                    } else {
-                        continuation.resume()
+            try await withThrowingTaskGroup(of: Void.self) { group in
+                group.addTask {
+                    try await withCheckedThrowingContinuation {
+                        (continuation: CheckedContinuation<Void, Error>) in
+                        task.sendPing { error in
+                            if let error {
+                                continuation.resume(throwing: error)
+                            } else {
+                                continuation.resume()
+                            }
+                        }
                     }
                 }
+                group.addTask {
+                    try await Task.sleep(nanoseconds: Self.connectTimeoutNs)
+                    throw WebSocketError.connectionFailed(
+                        "connect timed out after \(Self.connectTimeoutNs / 1_000_000_000)s"
+                    )
+                }
+                // First task to finish wins; cancel the other.
+                try await group.next()
+                group.cancelAll()
             }
         } catch {
             // The server may have rejected us. Check the close code to
@@ -42,6 +62,8 @@ public actor WebSocketClient: WebSocketClientProtocol {
         }
         self.task = task
     }
+
+    private static let connectTimeoutNs: UInt64 = 10_000_000_000  // 10s
 
     public func disconnect() {
         task?.cancel(with: .normalClosure, reason: nil)
