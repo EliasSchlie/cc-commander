@@ -105,6 +105,15 @@ public final class SessionStream {
         entries[idx].setResult(content)
     }
 
+    /// Append a user message entry from a locally-typed prompt. Called
+    /// optimistically by `AppState.sendPrompt` so the user sees what they
+    /// just sent immediately -- the runner does not echo user prompts back
+    /// during a live turn, only via `session_history` reload.
+    public func addUserMessage(_ text: String) {
+        flushPendingText()
+        appendEntry(.userMessage(id: UUID().uuidString, text: text))
+    }
+
     public func setPendingPrompt(_ payload: UserPromptPayload) {
         flushPendingText()
         pendingPrompt = payload
@@ -126,6 +135,18 @@ public final class SessionStream {
     }
 
     public func loadHistory(_ messages: [AnyCodable], error: String? = nil) {
+        // History may arrive after live events (optimistic user messages
+        // or stream deltas) already populated `entries`. Replaying would
+        // duplicate and reorder them, so drop the historical messages --
+        // but still surface a `historyUnavailable` marker if the reply
+        // carried an error, since the user should see degraded state
+        // even when some live events arrived first.
+        guard entries.isEmpty else {
+            if let code = error {
+                appendEntry(.historyUnavailable(id: UUID().uuidString, code: code))
+            }
+            return
+        }
         for msg in messages {
             guard case .dictionary(let dict) = msg,
                   case .string(let role) = dict["role"] else { continue }

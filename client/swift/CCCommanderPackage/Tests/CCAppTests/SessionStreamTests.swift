@@ -142,6 +142,57 @@ struct SessionStreamTests {
         #expect(stream.entries.count == 2)
     }
 
+    // Prevents: typed user prompts vanish from the UI because the runner
+    // never echoes them back during a live turn (only via session_history).
+    @Test func addUserMessageAppendsEntryAndFlushesPendingText() {
+        let stream = SessionStream(sessionId: "s1")
+        stream.appendText("partial assistant ")
+        stream.addUserMessage("hello there")
+        #expect(stream.pendingText.isEmpty)
+        #expect(stream.entries.count == 2)
+        if case .assistantText(_, let text) = stream.entries[0] {
+            #expect(text == "partial assistant ")
+        } else {
+            Issue.record("expected pending text to flush before user message")
+        }
+        if case .userMessage(_, let text) = stream.entries[1] {
+            #expect(text == "hello there")
+        } else {
+            Issue.record("expected userMessage entry")
+        }
+    }
+
+    // Prevents: late session_history reply duplicates optimistic entries.
+    // If the user sends a prompt while history is still in flight, the
+    // historical replay must be dropped to avoid out-of-order duplication.
+    @Test func loadHistoryDropsReplayWhenEntriesAlreadyPopulated() {
+        let stream = SessionStream(sessionId: "s1")
+        stream.addUserMessage("first")
+        stream.loadHistory([
+            .dictionary(["role": .string("user"), "content": .string("first")]),
+            .dictionary(["role": .string("assistant"), "content": .string("reply")]),
+        ])
+        #expect(stream.entries.count == 1)
+        if case .userMessage(_, let text) = stream.entries[0] {
+            #expect(text == "first")
+        }
+    }
+
+    // Prevents: dropping a degraded `historyUnavailable` reply just because
+    // some live events arrived first. The user must still see that history
+    // could not be loaded, even when the optimistic-replay guard fires.
+    @Test func loadHistoryStillSurfacesErrorMarkerWhenEntriesPopulated() {
+        let stream = SessionStream(sessionId: "s1")
+        stream.addUserMessage("first")
+        stream.loadHistory([], error: "timeout")
+        #expect(stream.entries.count == 2)
+        if case .historyUnavailable(_, let code) = stream.entries[1] {
+            #expect(code == "timeout")
+        } else {
+            Issue.record("expected historyUnavailable marker after late error reply")
+        }
+    }
+
     // Prevents: history not loaded from opaque SDK messages
     @Test func loadHistoryParsesUserAndAssistantMessages() {
         let stream = SessionStream(sessionId: "s1")
