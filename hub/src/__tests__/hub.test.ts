@@ -20,10 +20,10 @@ function connectClient(token: string): Promise<WebSocket> {
   });
 }
 
-function connectAgent(registrationToken: string): Promise<WebSocket> {
+function connectRunner(registrationToken: string): Promise<WebSocket> {
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(
-      `ws://localhost:${port}/ws/agent?token=${registrationToken}`,
+      `ws://localhost:${port}/ws/runner?token=${registrationToken}`,
     );
     ws.on("open", () => resolve(ws));
     ws.on("error", reject);
@@ -190,9 +190,9 @@ describe("WebSocket auth", () => {
     assert.equal(code, 4001);
   });
 
-  // Prevents: unregistered agents connecting
-  it("rejects agent with invalid token", async () => {
-    const ws = new WebSocket(`ws://localhost:${port}/ws/agent?token=fake`);
+  // Prevents: unregistered runners connecting
+  it("rejects runner with invalid token", async () => {
+    const ws = new WebSocket(`ws://localhost:${port}/ws/runner?token=fake`);
     const code = await new Promise<number>((resolve) => {
       ws.on("close", (c) => resolve(c));
     });
@@ -238,13 +238,13 @@ describe("message validation", () => {
 // ── Session lifecycle ───────────────────────────────────────────────────
 
 describe("session lifecycle", () => {
-  // Prevents: session start not reaching agent, or agent response not reaching client
+  // Prevents: session start not reaching runner, or runner response not reaching client
   it("starts a session and relays stream events", async () => {
     const tokens = await auth.register("user@test.com", "pass");
     const account = db.getAccountByEmail("user@test.com")!;
     const machine = db.createMachine(account.id, "Test Machine");
 
-    const agentWs = await connectAgent(machine.registrationToken);
+    const runnerWs = await connectRunner(machine.registrationToken);
     const clientWs = await connectClient(tokens.token);
 
     // Drain initial messages
@@ -270,8 +270,8 @@ describe("session lifecycle", () => {
       clientMsgs.push(JSON.parse(data.toString()));
     });
 
-    const agentMsgPromise = new Promise<any>((resolve) => {
-      agentWs.once("message", (data) => resolve(JSON.parse(data.toString())));
+    const runnerMsgPromise = new Promise<any>((resolve) => {
+      runnerWs.once("message", (data) => resolve(JSON.parse(data.toString())));
     });
 
     send(clientWs, {
@@ -280,16 +280,16 @@ describe("session lifecycle", () => {
       directory: "/projects/test",
       prompt: "Hello",
     });
-    const cmd = await agentMsgPromise;
+    const cmd = await runnerMsgPromise;
     assert.equal(cmd.type, "hub_start_session");
     assert.ok(cmd.sessionId);
 
-    send(agentWs, {
+    send(runnerWs, {
       type: "stream_text",
       sessionId: cmd.sessionId,
       content: "Hello! ",
     });
-    send(agentWs, {
+    send(runnerWs, {
       type: "session_done",
       sessionId: cmd.sessionId,
       sdkSessionId: "sdk-1",
@@ -312,7 +312,7 @@ describe("session lifecycle", () => {
     assert.equal(session.status, "idle");
     assert.equal(session.sdkSessionId, "sdk-1");
 
-    await closeWs(agentWs);
+    await closeWs(runnerWs);
     await closeWs(clientWs);
   });
 });
@@ -327,7 +327,7 @@ describe("account isolation", () => {
     const account2 = db.getAccountByEmail("user2@test.com")!;
     const machine2 = db.createMachine(account2.id, "Machine 2");
 
-    const agentWs = await connectAgent(machine2.registrationToken);
+    const runnerWs = await connectRunner(machine2.registrationToken);
     const clientWs = await connectClient(tokens1.token);
 
     const errorPromise = waitForMsg(clientWs, (m) => m.type === "error");
@@ -340,27 +340,27 @@ describe("account isolation", () => {
     const msg = await errorPromise;
     assert.match(msg.message, /not found/i);
 
-    await closeWs(agentWs);
+    await closeWs(runnerWs);
     await closeWs(clientWs);
   });
 });
 
-// ── Agent reconnect ─────────────────────────────────────────────────────
+// ── Runner reconnect ─────────────────────────────────────────────────────
 
-describe("agent reconnect", () => {
-  // Prevents: agent appearing offline after reconnect (race on close handler)
-  it("handles agent reconnect without losing the new connection", async () => {
+describe("runner reconnect", () => {
+  // Prevents: runner appearing offline after reconnect (race on close handler)
+  it("handles runner reconnect without losing the new connection", async () => {
     const tokens = await auth.register("user@test.com", "pass");
     const account = db.getAccountByEmail("user@test.com")!;
     const machine = db.createMachine(account.id, "Test Machine");
 
-    const agent1 = await connectAgent(machine.registrationToken);
-    const agent2 = await connectAgent(machine.registrationToken);
+    const runner1 = await connectRunner(machine.registrationToken);
+    const runner2 = await connectRunner(machine.registrationToken);
 
-    // Wait for agent1 close event to propagate
+    // Wait for runner1 close event to propagate
     await new Promise((r) => setTimeout(r, 200));
 
-    // agent2 should still be connected, and hub should know it
+    // runner2 should still be connected, and hub should know it
     // Collect messages from the moment the WebSocket connects
     const msgs: any[] = [];
     const clientWs = await new Promise<WebSocket>((resolve, reject) => {
@@ -393,11 +393,11 @@ describe("agent reconnect", () => {
     assert.equal(
       machineList.machines[0].online,
       true,
-      `Machine should be online, agents map has agent2`,
+      `Machine should be online, runners map has runner2`,
     );
 
-    await closeWs(agent1);
-    await closeWs(agent2);
+    await closeWs(runner1);
+    await closeWs(runner2);
     await closeWs(clientWs);
   });
 });
