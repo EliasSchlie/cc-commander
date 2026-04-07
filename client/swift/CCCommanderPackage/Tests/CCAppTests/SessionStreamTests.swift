@@ -160,6 +160,78 @@ struct SessionStreamTests {
         #expect(stream.currentTurnStartIndex == 2)
     }
 
+    // Prevents #14: tool_use/tool_result blocks dropped on history reload
+    @Test func loadHistoryPreservesToolCallsAndResults() {
+        let stream = SessionStream(sessionId: "s1")
+        stream.loadHistory([
+            .dictionary([
+                "role": .string("assistant"),
+                "content": .array([
+                    .dictionary(["type": .string("text"), "text": .string("Let me check.")]),
+                    .dictionary([
+                        "type": .string("tool_use"),
+                        "id": .string("toolu_1"),
+                        "name": .string("Bash"),
+                        "input": .dictionary(["command": .string("ls")]),
+                    ]),
+                ]),
+            ]),
+            .dictionary([
+                "role": .string("user"),
+                "content": .array([
+                    .dictionary([
+                        "type": .string("tool_result"),
+                        "tool_use_id": .string("toolu_1"),
+                        "content": .string("file.txt"),
+                    ]),
+                ]),
+            ]),
+        ])
+
+        #expect(stream.entries.count == 2)
+
+        if case .assistantText(_, let text) = stream.entries[0] {
+            #expect(text == "Let me check.")
+        } else {
+            Issue.record("entry 0 should be assistantText")
+        }
+
+        if case .toolCall(_, let toolCallId, let toolName, let display, let result) = stream.entries[1] {
+            #expect(toolCallId == "toolu_1")
+            #expect(toolName == "Bash")
+            #expect(display == "$ ls")
+            #expect(result == "file.txt")
+        } else {
+            Issue.record("entry 1 should be toolCall with result")
+        }
+    }
+
+    // Prevents #14: orphan tool_result still surfaces (not silently dropped)
+    @Test func loadHistoryOrphanToolResultBecomesEntry() {
+        let stream = SessionStream(sessionId: "s1")
+        stream.loadHistory([
+            .dictionary([
+                "role": .string("user"),
+                "content": .array([
+                    .dictionary([
+                        "type": .string("tool_result"),
+                        "tool_use_id": .string("toolu_orphan"),
+                        "content": .array([
+                            .dictionary(["type": .string("text"), "text": .string("result text")]),
+                        ]),
+                    ]),
+                ]),
+            ]),
+        ])
+        #expect(stream.entries.count == 1)
+        if case .toolCall(_, let tcId, _, _, let result) = stream.entries[0] {
+            #expect(tcId == "toolu_orphan")
+            #expect(result == "result text")
+        } else {
+            Issue.record("orphan tool_result should produce toolCall entry")
+        }
+    }
+
     // Prevents: isGenerating not accurate during running status
     @Test func isGeneratingReflectsStatus() {
         let stream = SessionStream(sessionId: "s1")

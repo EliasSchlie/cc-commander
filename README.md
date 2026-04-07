@@ -25,6 +25,12 @@ A MacBook can be both a client and a runner. A phone is only a client. A VPS is 
 - [`runner/SPEC.md`](runner/SPEC.md) -- the process that runs Claude Code sessions on each machine
 - [`hub/SPEC.md`](hub/SPEC.md) -- the central server
 
+## Running it
+
+See [`DEPLOY.md`](DEPLOY.md) for an end-to-end guide: hub on a VPS,
+runner on a Mac, client app on your laptop. There's also a
+"local all-in-one" section if you just want to try it on one machine.
+
 ## Repository
 
 Monorepo. Each component builds, tests, and deploys independently. They share no runtime code -- they communicate only over the network.

@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  cc-commander runner launchd agent.
+
+  Install with:  ./runner/launchd/install.sh
+  This file gets copied to ~/Library/LaunchAgents/ with paths substituted.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.cc-commander.runner</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>__NODE__</string>
+        <string>--experimental-strip-types</string>
+        <string>__RUNNER_DIR__/src/cli.ts</string>
+        <string>run</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>__HOME__</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
+        <key>HOME</key>
+        <string>__HOME__</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+        <key>Crashed</key>
+        <true/>
+    </dict>
+
+    <key>ThrottleInterval</key>
+    <integer>5</integer>
+
+    <key>StandardOutPath</key>
+    <string>__HOME__/Library/Logs/cc-commander-runner.log</string>
+    <key>StandardErrorPath</key>
+    <string>__HOME__/Library/Logs/cc-commander-runner.log</string>
+</dict>
+</plist>

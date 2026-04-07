@@ -8,10 +8,23 @@ struct CCCommanderApp: App {
         connection: HubConnection(baseURL: Self.hubBaseURL)
     )
 
-    /// Reads HUB_BASE_URL from Info.plist (set via build settings) or
-    /// falls back to localhost for development. See issue #10.
+    /// Resolves the hub base URL in priority order:
+    ///   1. UserDefaults "HubBaseURL"   ← runtime override, no rebuild required
+    ///   2. Info.plist HUB_BASE_URL     ← baked at build time (see project.yml)
+    ///   3. http://localhost:3000       ← dev fallback
+    ///
+    /// Override at runtime without rebuilding:
+    ///   defaults write com.cc-commander.app HubBaseURL https://hub.example.com
+    ///   defaults delete com.cc-commander.app HubBaseURL  # to revert
     private static var hubBaseURL: URL {
+        if let override = UserDefaults.standard.string(forKey: "HubBaseURL"),
+           !override.isEmpty,
+           let url = URL(string: override) {
+            return url
+        }
         if let urlString = Bundle.main.object(forInfoDictionaryKey: "HUB_BASE_URL") as? String,
+           !urlString.isEmpty,
+           !urlString.contains("$("),  // unresolved $(VAR) — treat as missing
            let url = URL(string: urlString) {
             return url
         }

@@ -1,0 +1,18 @@
+services:
+  hub:
+    build: .
+    image: cc-commander-hub:latest
+    container_name: cc-commander-hub
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3000:3000"
+    environment:
+      # Generate once with: openssl rand -hex 32
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
+      PORT: "3000"
+      HUB_DB_PATH: /data/hub.db
+    volumes:
+      - hub-data:/data
+
+volumes:
+  hub-data:
