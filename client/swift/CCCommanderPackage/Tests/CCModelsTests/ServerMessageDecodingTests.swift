@@ -232,13 +232,47 @@ struct ServerMessageDecodingTests {
         """.data(using: .utf8)!
 
         let msg = try decoder.decode(ServerMessage.self, from: json)
-        guard case .sessionHistory(let sid, let rid, let messages) = msg else {
+        guard case .sessionHistory(let sid, let rid, let messages, let error) = msg else {
             Issue.record("Expected sessionHistory, got \\(msg)")
             return
         }
         #expect(sid == "s1")
         #expect(rid == "r1")
         #expect(messages.count == 1)
+        #expect(error == nil)
+    }
+
+    // Prevents: a hub that explicitly serializes `error: null` (some JSON
+    // libraries do) being misread as the field present-with-empty.
+    @Test func decodesSessionHistoryWithExplicitNullError() throws {
+        let json = """
+        {"type": "session_history", "sessionId": "s1", "requestId": "r1", "messages": [], "error": null}
+        """.data(using: .utf8)!
+
+        let msg = try decoder.decode(ServerMessage.self, from: json)
+        guard case .sessionHistory(_, _, _, let error) = msg else {
+            Issue.record("Expected sessionHistory")
+            return
+        }
+        #expect(error == nil)
+    }
+
+    // Prevents: degraded session_history reply being indistinguishable
+    // from a healthy empty one. The new optional `error` field carries
+    // a stable code (timeout / no_session / fetch_failed) so the UI can
+    // render "history unavailable" instead of an empty pane.
+    @Test func decodesSessionHistoryWithErrorCode() throws {
+        let json = """
+        {"type": "session_history", "sessionId": "s1", "requestId": "r1", "messages": [], "error": "timeout"}
+        """.data(using: .utf8)!
+
+        let msg = try decoder.decode(ServerMessage.self, from: json)
+        guard case .sessionHistory(_, _, let messages, let error) = msg else {
+            Issue.record("Expected sessionHistory")
+            return
+        }
+        #expect(messages.isEmpty)
+        #expect(error == "timeout")
     }
 
     // Prevents: unknown message types crash the app

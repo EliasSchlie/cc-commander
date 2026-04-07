@@ -9,6 +9,15 @@ public enum SessionEntry: Identifiable {
     case userMessage(id: String, text: String)
     case userPromptResponse(id: String, summary: String)
     case error(id: String, message: String)
+    /// Sentinel rendered at the head of `entries` after old entries were
+    /// dropped to keep the cap. `droppedCount` is monotonically merged
+    /// across consecutive evictions so the user sees one running total
+    /// instead of a marker for every overflow tick.
+    case evictionMarker(id: String, droppedCount: Int)
+    /// Sentinel rendered when a `session_history` reply arrived with an
+    /// `error` field set (timeout / no_session / fetch_failed). Lets the
+    /// UI distinguish "no history yet" from "we tried and failed".
+    case historyUnavailable(id: String, code: String)
 
     public var id: String {
         switch self {
@@ -17,6 +26,8 @@ public enum SessionEntry: Identifiable {
         case .userMessage(let id, _): return id
         case .userPromptResponse(let id, _): return id
         case .error(let id, _): return id
+        case .evictionMarker(let id, _): return id
+        case .historyUnavailable(let id, _): return id
         }
     }
 
@@ -110,7 +121,7 @@ public final class SessionStream {
         currentTurnStartIndex = entries.count
     }
 
-    public func loadHistory(_ messages: [AnyCodable]) {
+    public func loadHistory(_ messages: [AnyCodable], error: String? = nil) {
         for msg in messages {
             guard case .dictionary(let dict) = msg,
                   case .string(let role) = dict["role"] else { continue }
@@ -175,6 +186,11 @@ public final class SessionStream {
                 }
             }
         }
+        if let code = error {
+            // Surface the degraded reply to the user instead of showing
+            // an empty pane that's indistinguishable from "no history".
+            appendEntry(.historyUnavailable(id: UUID().uuidString, code: code))
+        }
         currentTurnStartIndex = entries.count
     }
 
@@ -218,13 +234,42 @@ public final class SessionStream {
 
     /// Append `entry` to `entries`, evicting the oldest entries if the cap
     /// is exceeded. Adjusts `currentTurnStartIndex` so it still points at
-    /// the same logical entry (or 0 if that entry was evicted).
+    /// the same logical entry (or 0 if that entry was evicted). When
+    /// eviction happens, an `.evictionMarker` is inserted/updated at the
+    /// head so the user can see how many entries were dropped.
+    ///
+    /// The marker itself does NOT count toward `maxEntries` -- treating
+    /// it as overhead keeps the cap math simple and the +1 entry is
+    /// negligible against a 500-entry cap.
     private func appendEntry(_ entry: SessionEntry) {
         entries.append(entry)
-        let overflow = entries.count - Self.maxEntries
-        if overflow > 0 {
-            entries.removeFirst(overflow)
-            currentTurnStartIndex = max(0, currentTurnStartIndex - overflow)
+        let realCount = entries.count - (hasEvictionMarker ? 1 : 0)
+        let overflow = realCount - Self.maxEntries
+        guard overflow > 0 else { return }
+
+        let removeStart = hasEvictionMarker ? 1 : 0
+        entries.removeSubrange(removeStart..<(removeStart + overflow))
+        currentTurnStartIndex = max(removeStart, currentTurnStartIndex - overflow)
+        recordDropped(count: overflow)
+    }
+
+    private var hasEvictionMarker: Bool {
+        if case .evictionMarker = entries.first { return true }
+        return false
+    }
+
+    /// Insert or update the head `.evictionMarker` so consecutive trims
+    /// coalesce into one running total instead of a marker per tick.
+    private func recordDropped(count: Int) {
+        if case .evictionMarker(let id, let prev) = entries.first {
+            entries[0] = .evictionMarker(id: id, droppedCount: prev + count)
+            return
         }
+        entries.insert(
+            .evictionMarker(id: UUID().uuidString, droppedCount: count),
+            at: 0
+        )
+        // The inserted marker shifts every later index by 1.
+        currentTurnStartIndex += 1
     }
 }
