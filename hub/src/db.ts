@@ -144,14 +144,13 @@ export class HubDb {
     return row ? toMachineRow(row) : undefined;
   }
 
-  listMachinesForAccount(accountId: string): MachineInfo[] {
+  listMachinesForAccount(accountId: string): Omit<MachineInfo, "online">[] {
     const rows = this.db
       .prepare("SELECT id, name, last_seen FROM machines WHERE account_id = ?")
       .all(accountId) as any[];
     return rows.map((r) => ({
       machineId: r.id,
       name: r.name,
-      online: false,
       lastSeen: r.last_seen,
     }));
   }
