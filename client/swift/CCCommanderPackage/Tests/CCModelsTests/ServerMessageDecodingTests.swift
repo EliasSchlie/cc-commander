@@ -242,6 +242,21 @@ struct ServerMessageDecodingTests {
         #expect(error == nil)
     }
 
+    // Prevents: a hub that explicitly serializes `error: null` (some JSON
+    // libraries do) being misread as the field present-with-empty.
+    @Test func decodesSessionHistoryWithExplicitNullError() throws {
+        let json = """
+        {"type": "session_history", "sessionId": "s1", "requestId": "r1", "messages": [], "error": null}
+        """.data(using: .utf8)!
+
+        let msg = try decoder.decode(ServerMessage.self, from: json)
+        guard case .sessionHistory(_, _, _, let error) = msg else {
+            Issue.record("Expected sessionHistory")
+            return
+        }
+        #expect(error == nil)
+    }
+
     // Prevents: degraded session_history reply being indistinguishable
     // from a healthy empty one. The new optional `error` field carries
     // a stable code (timeout / no_session / fetch_failed) so the UI can

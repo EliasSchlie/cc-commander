@@ -354,6 +354,33 @@ struct SessionStreamTests {
         }
     }
 
+    // Prevents: currentTurnStartIndex drifting past `entries.count`
+    // after multiple coalesced evictions when the turn started at an
+    // entry that stays alive. Locks the invariant that the index always
+    // points at a real entry inside `entries` (or at `entries.count`).
+    @Test func turnStartSurvivesMultipleCoalescedEvictions() {
+        let stream = SessionStream(sessionId: "s1")
+        let cap = SessionStream.maxEntries
+        // Fill cap-50 entries, flushTurn, then append the rest of cap
+        // so turnStart points at a live entry near the tail.
+        for i in 0..<(cap - 50) {
+            stream.addError("pre\(i)")
+        }
+        stream.flushTurn()
+        let turnStartBefore = stream.currentTurnStartIndex
+        #expect(turnStartBefore == cap - 50)
+        // Append enough to trigger several distinct overflow batches.
+        for i in 0..<(cap * 2) {
+            stream.addError("post\(i)")
+        }
+        // Index must still be inside entries and point at a real entry.
+        #expect(stream.currentTurnStartIndex < stream.entries.count)
+        #expect(stream.currentTurnStartIndex >= 1) // past the marker
+        if case .evictionMarker = stream.entries[stream.currentTurnStartIndex] {
+            Issue.record("turn start should not point at the marker")
+        }
+    }
+
     // Prevents: turnStart==0 ("entire session is current turn") being
     // mishandled when the entry at index 0 is itself evicted. After the
     // marker is inserted, the turn must logically span the surviving
