@@ -629,9 +629,9 @@ export class Hub {
   private enrichedMachineList(
     accountId: string,
   ): import("@cc-commander/protocol").MachineInfo[] {
-    const machines = this.config.db.listMachinesForAccount(accountId);
-    for (const m of machines) m.online = this.runners.has(m.machineId);
-    return machines;
+    return this.config.db
+      .listMachinesForAccount(accountId)
+      .map((m) => ({ ...m, online: this.runners.has(m.machineId) }));
   }
 }
 
