@@ -1578,6 +1578,47 @@ describe("GET /api/debug/state", () => {
     assert.ok(Array.isArray(data.recentFailedSessions));
   });
 
+  // Prevents: cross-account enumeration of connected runner machineIds
+  // via /api/debug/state. The aggregate `runners.count` stays global;
+  // only the per-account `runners.machineIds` list is filtered.
+  it("only returns runners.machineIds for the requester's account", async () => {
+    const a = await auth.register("ra@test.com", "password");
+    const b = await auth.register("rb@test.com", "password");
+    const machineA = db.createMachine(
+      auth.verifyToken(a.token).accountId,
+      "ma",
+    );
+    const machineB = db.createMachine(
+      auth.verifyToken(b.token).accountId,
+      "mb",
+    );
+    const wsA = await connectRunner(machineA.registrationToken);
+    const wsB = await connectRunner(machineB.registrationToken);
+    try {
+      const fetchAs = async (token: string) => {
+        const res = await fetch(`${baseUrl}/api/debug/state`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        return (await res.json()) as {
+          runners: { count: number; machineIds: string[] };
+        };
+      };
+      const dataA = await fetchAs(a.token);
+      const dataB = await fetchAs(b.token);
+      // Aggregate count is global -- both runners are connected.
+      assert.equal(dataA.runners.count, 2);
+      assert.equal(dataB.runners.count, 2);
+      // Each caller sees only their own machineId. Asserting both
+      // sides catches a "always return requester X" style bug that a
+      // one-sided check would miss.
+      assert.deepEqual(dataA.runners.machineIds, [machineA.id]);
+      assert.deepEqual(dataB.runners.machineIds, [machineB.id]);
+    } finally {
+      wsA.close();
+      wsB.close();
+    }
+  });
+
   // Prevents: cross-account leak via /api/debug/state
   it("only returns recentFailedSessions for the requester's account", async () => {
     const a = await auth.register("a@test.com", "password");

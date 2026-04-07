@@ -36,9 +36,13 @@ open "$(./scripts/build-app.sh)"
 
 `scripts/build-app.sh` is the *only* sanctioned local build path. It:
 - runs xcodebuild with no signing override flags
-- finds the freshly-built `.app` under DerivedData (handles per-worktree path hashes)
+- queries `xcodebuild -showBuildSettings BUILT_PRODUCTS_DIR` to find the
+  freshly-built `.app` directly (no DerivedData scanning)
 - verifies `codesign` reports `TeamIdentifier=Q2U8K9N3BL` and bails loud if not
 - prints the .app path on stdout for piping into `open`
+
+For forks: set `CCC_EXPECTED_TEAM=YOURTEAM` to override the expected
+team without editing the script. project.yml needs the same change.
 
 **Do NOT pass `DEVELOPMENT_TEAM=` or `CODE_SIGN_IDENTITY=-` to xcodebuild
 for local builds.** Both project.yml and the generated xcodeproj set the
