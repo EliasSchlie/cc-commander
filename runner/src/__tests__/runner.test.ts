@@ -393,4 +393,34 @@ describe("protocol validation", () => {
     assert.equal(runner.ws?.readyState, WebSocket.OPEN);
     runner.disconnect();
   });
+
+  // Prevents: malformed hub_start_session (e.g. missing directory) crashing
+  // the runner inside the SDK call instead of being rejected at parse time
+  it("rejects hub_start_session missing required fields", async () => {
+    const runner = new MachineRunner({
+      hubUrl: `ws://localhost:${hubPort}`,
+      registrationToken: "test-token",
+      machineName: "Test",
+      queryFn: (() => {
+        throw new Error(
+          "queryFn must not be invoked for an invalid hub message",
+        );
+      }) as any,
+    });
+    await runner.connect();
+    await waitForRunnerMsg((m) => m.type === "runner_hello");
+
+    runnerSocket!.send(
+      JSON.stringify({
+        type: "hub_start_session",
+        sessionId: "s1",
+        // missing directory + prompt
+      }),
+    );
+    await new Promise((r) => setTimeout(r, 100));
+
+    // Runner survived the malformed message
+    assert.equal(runner.ws?.readyState, WebSocket.OPEN);
+    runner.disconnect();
+  });
 });

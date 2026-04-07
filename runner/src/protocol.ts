@@ -124,22 +124,51 @@ export type RunnerToHubMsg =
 
 // ── Parsing ─────────────────────────────────────────────────────────────
 
-const HUB_MSG_TYPES = new Set([
-  "hub_start_session",
-  "hub_send_prompt",
-  "hub_respond_to_prompt",
-  "hub_get_history",
-]);
+function isNonEmptyString(v: unknown): v is string {
+  return typeof v === "string" && v.length > 0;
+}
+
+function requireFields(
+  msg: Record<string, unknown>,
+  fields: readonly string[],
+): void {
+  for (const f of fields) {
+    if (!isNonEmptyString(msg[f])) {
+      throw new Error(
+        `Invalid ${String(msg.type)}: missing or empty field "${f}"`,
+      );
+    }
+  }
+}
 
 export function parseHubMessage(data: string): HubToRunnerMsg {
   const msg = JSON.parse(data);
   if (typeof msg !== "object" || msg === null || typeof msg.type !== "string") {
     throw new Error("Invalid message: missing type field");
   }
-  if (!HUB_MSG_TYPES.has(msg.type)) {
-    throw new Error(`Unknown hub message type: ${msg.type}`);
+  switch (msg.type) {
+    case "hub_start_session":
+      requireFields(msg, ["sessionId", "directory", "prompt"]);
+      return msg as HubStartSessionMsg;
+    case "hub_send_prompt":
+      requireFields(msg, ["sessionId", "prompt"]);
+      return msg as HubSendPromptMsg;
+    case "hub_respond_to_prompt": {
+      requireFields(msg, ["sessionId", "promptId"]);
+      const response = (msg as { response?: unknown }).response;
+      if (typeof response !== "object" || response === null) {
+        throw new Error(
+          'Invalid hub_respond_to_prompt: missing or invalid "response"',
+        );
+      }
+      return msg as HubRespondToPromptMsg;
+    }
+    case "hub_get_history":
+      requireFields(msg, ["sessionId", "requestId"]);
+      return msg as HubGetHistoryMsg;
+    default:
+      throw new Error(`Unknown hub message type: ${msg.type}`);
   }
-  return msg as HubToRunnerMsg;
 }
 
 export function serialize(msg: { type: string }): string {
