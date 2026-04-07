@@ -11,25 +11,30 @@ concurrency:
 
 jobs:
   node:
-    name: ${{ matrix.component }} (Node)
+    name: ${{ matrix.workspace }} (Node)
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        component: [hub, runner]
-    defaults:
-      run:
-        working-directory: ${{ matrix.component }}
+        include:
+          - workspace: protocol
+            package: "@cc-commander/protocol"
+          - workspace: hub
+            package: cc-commander-hub
+          - workspace: runner
+            package: cc-commander-runner
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
           cache: npm
-          cache-dependency-path: ${{ matrix.component }}/package-lock.json
+          cache-dependency-path: package-lock.json
+      # npm workspaces share a single root install; each workspace
+      # then runs its own scripts via `-w`.
       - run: npm ci
-      - run: npm run typecheck
-      - run: npm test
+      - run: npm run typecheck -w ${{ matrix.package }} --if-present
+      - run: npm test -w ${{ matrix.package }} --if-present
 
   swift:
     name: Swift package + macOS app

@@ -1,6 +1,10 @@
 services:
   hub:
-    build: .
+    # Build context is the repo root because hub depends on the
+    # workspace package @cc-commander/protocol (sibling directory).
+    build:
+      context: ..
+      dockerfile: hub/Dockerfile
     image: cc-commander-hub:latest
     container_name: cc-commander-hub
     restart: unless-stopped
@@ -11,6 +15,11 @@ services:
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
       PORT: "3000"
       HUB_DB_PATH: /data/hub.db
+      # Optional. When building locally (not via CI), set VERSION in
+      # .env to the git SHA so runners can self-update against this
+      # hub. CI builds bake VERSION via the Dockerfile ARG instead and
+      # this passthrough is a no-op.
+      VERSION: ${VERSION:-}
     volumes:
       - hub-data:/data
 

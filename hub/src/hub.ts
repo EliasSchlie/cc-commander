@@ -6,14 +6,14 @@ import {
   parseClientMessage,
   parseRunnerMessage,
   serialize,
-} from "./protocol.ts";
+} from "@cc-commander/protocol";
 import type {
   ClientToHubMsg,
   RunnerToHubMsg,
   HubToRunnerMsg,
   HubToClientMsg,
   RespondToPromptMsg,
-} from "./protocol.ts";
+} from "@cc-commander/protocol";
 import type { HubDb } from "./db.ts";
 import type { AuthService, JwtPayload } from "./auth.ts";
 import { DuplicateEmailError } from "./auth.ts";
@@ -628,7 +628,7 @@ export class Hub {
 
   private enrichedMachineList(
     accountId: string,
-  ): import("./protocol.ts").MachineInfo[] {
+  ): import("@cc-commander/protocol").MachineInfo[] {
     return this.config.db
       .listMachinesForAccount(accountId)
       .map((m) => ({ ...m, online: this.runners.has(m.machineId) }));
