@@ -29,6 +29,7 @@ export const HUB_METRIC = {
   HISTORY_ORPHAN_REPLY: "hub.history_orphan_reply",
   HISTORY_DEGRADED: "hub.history_degraded",
   DROPPED_TOOL_BLOCK: "hub.dropped_tool_block",
+  RATE_LIMITED: "hub.rate_limited",
 } as const;
 
 export const RUNNER_METRIC = {

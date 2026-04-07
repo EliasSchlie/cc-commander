@@ -62,6 +62,14 @@ export interface HubConfig {
     register?: { capacity: number; perMinute: number };
     refresh?: { capacity: number; perMinute: number };
     machineCreate?: { capacity: number; perHour: number };
+    /** Per-IP cap on /api/machines POSTs, layered ON TOP of the per-account
+     *  machineCreate limiter so multi-account abuse from one source IP
+     *  is bounded. Default 20/hour/IP. */
+    machineCreateIp?: { capacity: number; perHour: number };
+    /** Per-IP cap on /ws/{client,runner} upgrade attempts. Even rejected
+     *  upgrades have non-zero cost (socket alloc, handshake). Default
+     *  30/min/IP. */
+    wsUpgrade?: { capacity: number; perMinute: number };
   };
   /**
    * Inject a Metrics instance (mostly for tests, which want a fast
@@ -90,6 +98,14 @@ export class Hub {
   registerLimiter: TokenBucketRateLimiter;
   refreshLimiter: TokenBucketRateLimiter;
   machineCreateLimiter: TokenBucketRateLimiter;
+  machineCreateIpLimiter: TokenBucketRateLimiter;
+  wsUpgradeLimiter: TokenBucketRateLimiter;
+  /**
+   * All limiter instances in one place so start/stop sweeping is a
+   * single loop. Adding a new limiter only requires registering it
+   * here and at the call site, not in three lifecycle methods.
+   */
+  private limiters: TokenBucketRateLimiter[];
   metrics: Metrics;
 
   constructor(config: HubConfig) {
@@ -116,6 +132,19 @@ export class Hub {
       capacity: 10,
       perHour: 10,
     };
+    // 60/hour/IP (not 20) so legitimate users behind shared NAT
+    // (corporate, mobile carrier CGNAT, university) aren't immediately
+    // false-positived. The per-account layer (10/hour) still bounds
+    // single-user abuse; this layer exists to bound multi-account
+    // abuse from one source IP.
+    const machineIp = config.rateLimits?.machineCreateIp ?? {
+      capacity: 60,
+      perHour: 60,
+    };
+    const wsUpgrade = config.rateLimits?.wsUpgrade ?? {
+      capacity: 30,
+      perMinute: 30,
+    };
     this.loginLimiter = new TokenBucketRateLimiter({
       capacity: login.capacity,
       refillPerMs: login.perMinute / 60_000,
@@ -132,18 +161,47 @@ export class Hub {
       capacity: machine.capacity,
       refillPerMs: machine.perHour / 3_600_000,
     });
+    this.machineCreateIpLimiter = new TokenBucketRateLimiter({
+      capacity: machineIp.capacity,
+      refillPerMs: machineIp.perHour / 3_600_000,
+    });
+    this.wsUpgradeLimiter = new TokenBucketRateLimiter({
+      capacity: wsUpgrade.capacity,
+      refillPerMs: wsUpgrade.perMinute / 60_000,
+    });
+    this.limiters = [
+      this.loginLimiter,
+      this.registerLimiter,
+      this.refreshLimiter,
+      this.machineCreateLimiter,
+      this.machineCreateIpLimiter,
+      this.wsUpgradeLimiter,
+    ];
     this.metrics = config.metrics ?? new Metrics();
 
     this.httpServer = createServer((req, res) => this.handleHttp(req, res));
-    this.wss = new WebSocketServer({ server: this.httpServer });
+    this.wss = new WebSocketServer({
+      server: this.httpServer,
+      // Per-IP rate limit BEFORE the upgrade completes. Even rejected
+      // upgrades have non-zero cost (socket alloc, handshake, FD), and
+      // an attacker can hold half-open sockets to the FD ceiling. The
+      // ws library's two-arg verifyClient lets us set the HTTP status
+      // so the client (or attacker's botnet) sees a real 429 instead
+      // of the default 401.
+      verifyClient: (info, cb) => {
+        if (!this.wsUpgradeLimiter.tryConsume(clientIp(info.req))) {
+          this.metrics.inc(HUB_METRIC.RATE_LIMITED, { limiter: "ws_upgrade" });
+          cb(false, 429, "Too Many Requests");
+          return;
+        }
+        cb(true);
+      },
+    });
     this.wss.on("connection", (ws, req) => this.handleConnection(ws, req));
   }
 
   start(): Promise<void> {
-    this.loginLimiter.startSweeping();
-    this.registerLimiter.startSweeping();
-    this.refreshLimiter.startSweeping();
-    this.machineCreateLimiter.startSweeping();
+    for (const limiter of this.limiters) limiter.startSweeping();
     this.metrics.start();
     return new Promise((resolve) => {
       this.httpServer.listen(this.config.port, () => resolve());
@@ -152,10 +210,7 @@ export class Hub {
 
   stop(): Promise<void> {
     return new Promise((resolve, reject) => {
-      this.loginLimiter.stop();
-      this.registerLimiter.stop();
-      this.refreshLimiter.stop();
-      this.machineCreateLimiter.stop();
+      for (const limiter of this.limiters) limiter.stop();
       this.metrics.stop();
       for (const [, conn] of this.clients) conn.ws.close();
       for (const [, conn] of this.runners) conn.ws.close();
@@ -215,6 +270,7 @@ export class Hub {
     const limiter =
       action === "register" ? this.registerLimiter : this.loginLimiter;
     if (!limiter.tryConsume(ip)) {
+      this.metrics.inc(HUB_METRIC.RATE_LIMITED, { limiter: action });
       res.writeHead(429);
       res.end(JSON.stringify({ error: "Too many requests" }));
       return;
@@ -246,6 +302,7 @@ export class Hub {
     res: ServerResponse,
   ): Promise<void> {
     if (!this.refreshLimiter.tryConsume(clientIp(req))) {
+      this.metrics.inc(HUB_METRIC.RATE_LIMITED, { limiter: "refresh" });
       res.writeHead(429);
       res.end(JSON.stringify({ error: "Too many requests" }));
       return;
@@ -281,7 +338,21 @@ export class Hub {
       return;
     }
 
-    if (!this.machineCreateLimiter.tryConsume(payload.accountId)) {
+    // Two-layer check: per-account (existing) catches rapid abuse from
+    // a single user; per-IP (new) catches multi-account abuse from one
+    // source. Both layers consume independently so the tokens reflect
+    // attempts, not survivors -- a wasted token regenerates at the
+    // configured rate either way.
+    const accountOk = this.machineCreateLimiter.tryConsume(payload.accountId);
+    const ipOk = this.machineCreateIpLimiter.tryConsume(clientIp(req));
+    if (!accountOk || !ipOk) {
+      // Label which layer rejected so operators can tell single-user
+      // abuse from multi-account abuse from one IP. If both layers
+      // rejected on the same call, "machine_account" wins (per-account
+      // is the user-visible quota and the more specific signal).
+      this.metrics.inc(HUB_METRIC.RATE_LIMITED, {
+        limiter: !accountOk ? "machine_account" : "machine_ip",
+      });
       res.writeHead(429);
       res.end(JSON.stringify({ error: "Too many machines created recently" }));
       return;
@@ -780,7 +851,14 @@ const BEARER_PREFIX = "Bearer ";
  * unconditionally would let any caller spoof their bucket key.
  */
 function clientIp(req: IncomingMessage): string {
-  return req.socket.remoteAddress ?? "unknown";
+  const raw = req.socket.remoteAddress ?? "unknown";
+  // Normalize IPv4-mapped IPv6 (::ffff:1.2.3.4 → 1.2.3.4) so the same
+  // attacker connecting over both stacks lands in the same bucket. Same
+  // for IPv6 loopback (::1) which we map to 127.0.0.1 to match localhost
+  // tests and reverse proxies that forward over IPv4.
+  if (raw.startsWith("::ffff:")) return raw.slice("::ffff:".length);
+  if (raw === "::1") return "127.0.0.1";
+  return raw;
 }
 
 function extractBearerToken(req: IncomingMessage): string | null {
