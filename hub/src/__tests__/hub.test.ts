@@ -1559,4 +1559,29 @@ describe("session lifecycle in DB", () => {
     db.updateSessionStatus(sess.id, "running");
     assert.equal(db.getSessionById(sess.id)!.endedAt, null);
   });
+
+  // Prevents: machine-disconnect → reconnect → recovery leaving the
+  // recovered session stuck with the disconnect-time ended_at, which
+  // would mis-classify it as "still failed" in post-mortem queries
+  it("recovers ended_at after a machine disconnect mark + restart", async () => {
+    const tokens = await auth.register("disco@test.com", "password");
+    const accountId = auth.verifyToken(tokens.token).accountId;
+    const machine = db.createMachine(accountId, "lab");
+    const sess = db.createSession(accountId, machine.id, "/w", "running");
+    // Simulate hub-side disconnect handling.
+    const affected = db.markSessionsErrorForMachine(
+      machine.id,
+      "Runner disconnected",
+    );
+    assert.equal(affected, 1);
+    const errored = db.getSessionById(sess.id)!;
+    assert.equal(errored.status, "error");
+    assert.equal(errored.errorMessage, "Runner disconnected");
+    assert.ok(errored.endedAt);
+    // Runner reconnects, session is restarted -> recovery clears ended_at.
+    db.updateSessionStatus(sess.id, "running");
+    const recovered = db.getSessionById(sess.id)!;
+    assert.equal(recovered.status, "running");
+    assert.equal(recovered.endedAt, null);
+  });
 });

@@ -270,6 +270,18 @@ export class HubDb {
     }));
   }
 
+  /**
+   * Update a session's status, optional last-message preview, and
+   * (for status='error') error_message + ended_at lifecycle columns.
+   *
+   * IMPORTANT: when status='error', the caller passes the human-
+   * readable error string as `preview`. Hub-side message dispatch
+   * (`ws/runnerMessage.ts`, the `session_error` case) does this
+   * intentionally so the error text is visible in both the live
+   * `last_message_preview` and the post-mortem `error_message`
+   * column. The double-duty arg is historical (pre-dating
+   * error_message) and kept to avoid touching every call site.
+   */
   updateSessionStatus(
     sessionId: string,
     status: SessionStatus,
