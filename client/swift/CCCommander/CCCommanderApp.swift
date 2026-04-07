@@ -22,6 +22,14 @@ struct CCCommanderApp: App {
         WindowGroup {
             RootView()
                 .environment(appState)
+                .task {
+                    // On launch, if we have stored tokens try to reconnect.
+                    // Without this, returning users see an empty session list forever.
+                    if appState.connection.hasStoredCredentials {
+                        try? await appState.connection.connectWithStoredTokens()
+                        appState.startListening()
+                    }
+                }
         }
         #if os(macOS)
         .defaultSize(width: 1000, height: 700)

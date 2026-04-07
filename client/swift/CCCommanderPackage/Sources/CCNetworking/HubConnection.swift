@@ -82,9 +82,11 @@ public final class HubConnection {
         }
         do {
             try await connectWebSocket(token: token)
-        } catch let error as WebSocketError {
-            // Only refresh on auth rejection, not network errors
-            guard let refresh = keychain.refreshToken else { throw error }
+        } catch WebSocketError.authRejected {
+            // JWT was rejected -- try to refresh it
+            guard let refresh = keychain.refreshToken else {
+                throw WebSocketError.authRejected
+            }
             let tokens = try await authClient.refresh(refreshToken: refresh)
             try keychain.saveTokens(jwt: tokens.token, refreshToken: tokens.refreshToken)
             try await connectWebSocket(token: tokens.token)
@@ -162,23 +164,33 @@ public final class HubConnection {
         shouldReconnect = true
         reconnectDelay = 1.0
 
-        let ws = wsClientFactory()
-        self.wsClient = ws
-
         // Build WSS URL with token in Authorization header (not query string,
         // to keep JWTs out of access logs).
         guard var components = URLComponents(url: baseURL, resolvingAgainstBaseURL: false) else {
+            state = .disconnected
             throw HubConnectionError.invalidURL
         }
         components.path = "/ws/client"
         components.scheme = (components.scheme == "https") ? "wss" : "ws"
         guard let wsURL = components.url else {
+            state = .disconnected
             throw HubConnectionError.invalidURL
         }
 
         var request = URLRequest(url: wsURL)
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        try await ws.connect(request: request)
+
+        let ws = wsClientFactory()
+        do {
+            try await ws.connect(request: request)
+        } catch {
+            // Connect failed -- don't store the leaked client, restore state
+            state = .disconnected
+            throw error
+        }
+
+        // Only commit the new client after successful connect
+        self.wsClient = ws
         state = .connected
         reconnectDelay = 1.0
 
@@ -230,13 +242,15 @@ public final class HubConnection {
     }
 
     private func attemptReconnect() async throws {
-        // Try stored JWT first; only refresh if it's rejected.
+        // Try stored JWT first; only refresh if it's specifically rejected.
+        // Other errors (network, server unreachable) bubble up so the loop
+        // retries the same JWT after backoff -- not burning the refresh token.
         if let token = keychain.jwt {
             do {
                 try await connectWebSocket(token: token)
                 return
-            } catch is WebSocketError {
-                // JWT may be expired -- fall through to refresh
+            } catch WebSocketError.authRejected {
+                // JWT expired -- fall through to refresh
             }
         }
         guard let refresh = keychain.refreshToken else {

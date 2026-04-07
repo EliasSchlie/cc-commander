@@ -110,6 +110,20 @@ struct HubConnectionTests {
         }
     }
 
+    // Prevents: failed connect leaks .connecting state and orphans the wsClient,
+    // making isAuthenticated falsely true on next launch attempt
+    @Test func failedConnectRestoresDisconnectedState() async {
+        let mockWS = MockWebSocketClient(shouldFailConnect: true)
+        let (conn, _, _, _) = makeConnection(mockWS: mockWS)
+        do {
+            try await conn.login(email: "user@test.com", password: "pass")
+            Issue.record("Login should have thrown")
+        } catch {
+            // Expected
+        }
+        #expect(conn.state == .disconnected)
+    }
+
     // Prevents: send before connect crashes
     @Test func sendBeforeConnectThrows() async {
         let (conn, _, _, _) = makeConnection()

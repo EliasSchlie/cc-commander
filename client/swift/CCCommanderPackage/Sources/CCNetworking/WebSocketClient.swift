@@ -18,17 +18,29 @@ public actor WebSocketClient: WebSocketClientProtocol {
     public func connect(request: URLRequest) async throws {
         let task = session.webSocketTask(with: request)
         task.resume()
-        self.task = task
         // Send a ping to verify connection is alive
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            task.sendPing { error in
-                if let error {
-                    continuation.resume(throwing: error)
-                } else {
-                    continuation.resume()
+        do {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                task.sendPing { error in
+                    if let error {
+                        continuation.resume(throwing: error)
+                    } else {
+                        continuation.resume()
+                    }
                 }
             }
+        } catch {
+            // The server may have rejected us. Check the close code to
+            // distinguish auth rejection (4001) from network failure.
+            // Note: closeCode is .invalid until the close handshake completes.
+            let closeCode = task.closeCode
+            task.cancel()
+            if closeCode.rawValue == 4001 {
+                throw WebSocketError.authRejected
+            }
+            throw WebSocketError.connectionFailed(error.localizedDescription)
         }
+        self.task = task
     }
 
     public func disconnect() {
@@ -84,4 +96,7 @@ public actor WebSocketClient: WebSocketClientProtocol {
 public enum WebSocketError: Error, Sendable {
     case notConnected
     case connectionFailed(String)
+    /// Server rejected the connection due to invalid/expired credentials
+    /// (WebSocket close code 4001). Triggers a token refresh.
+    case authRejected
 }

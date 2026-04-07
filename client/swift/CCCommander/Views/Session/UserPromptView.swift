@@ -5,7 +5,10 @@ import CCApp
 struct UserPromptView: View {
     @Environment(AppState.self) private var appState
     let prompt: UserPromptPayload
-    @State private var answers: [String: String] = [:]
+    /// Selected option labels per question. Sets allow multi-select questions
+    /// to track multiple selections; single-select questions hold a 1-element set.
+    @State private var selections: [String: Set<String>] = [:]
+    @State private var freeformAnswers: [String: String] = [:]
     @State private var isSubmitting = false
 
     var body: some View {
@@ -70,20 +73,22 @@ struct UserPromptView: View {
                 .font(.callout)
 
             if let options = question.options {
+                let isMulti = question.multiSelect ?? false
                 ForEach(options, id: \.label) { option in
+                    let selected = selections[question.question, default: []].contains(option.label)
                     Button {
-                        answers[question.question] = option.label
+                        toggle(option.label, in: question.question, multi: isMulti)
                     } label: {
                         HStack {
                             Text(option.label)
                             Spacer()
-                            if answers[question.question] == option.label {
+                            if selected {
                                 Image(systemName: "checkmark")
                             }
                         }
                     }
                     .buttonStyle(.bordered)
-                    .tint(answers[question.question] == option.label ? .accentColor : .secondary)
+                    .tint(selected ? .accentColor : .secondary)
                 }
             } else {
                 TextField("Your answer", text: binding(for: question.question))
@@ -92,14 +97,47 @@ struct UserPromptView: View {
         }
     }
 
+    private func toggle(_ option: String, in question: String, multi: Bool) {
+        var current = selections[question, default: []]
+        if multi {
+            if current.contains(option) {
+                current.remove(option)
+            } else {
+                current.insert(option)
+            }
+        } else {
+            current = [option]
+        }
+        selections[question] = current
+    }
+
     private func binding(for key: String) -> Binding<String> {
         Binding(
-            get: { answers[key, default: ""] },
-            set: { answers[key] = $0 }
+            get: { freeformAnswers[key, default: ""] },
+            set: { freeformAnswers[key] = $0 }
         )
     }
 
+    /// Build the answers dict to send. Multi-select questions are joined with
+    /// ", " (the convention used by the Claude SDK's AskUserQuestion tool).
+    private func buildAnswers() -> [String: String] {
+        var result: [String: String] = [:]
+        guard let questions = prompt.questions else { return result }
+        for q in questions {
+            if q.options != nil {
+                let picked = selections[q.question, default: []]
+                if !picked.isEmpty {
+                    result[q.question] = picked.sorted().joined(separator: ", ")
+                }
+            } else if let text = freeformAnswers[q.question], !text.isEmpty {
+                result[q.question] = text
+            }
+        }
+        return result
+    }
+
     private func submitAnswers() {
+        let answers = buildAnswers()
         submit(.answers(answers), summary: answers.values.joined(separator: ", "))
     }
 
@@ -114,8 +152,14 @@ struct UserPromptView: View {
     private func submit(_ response: UserPromptResponse, summary: String) {
         isSubmitting = true
         Task {
-            try? await appState.respondToPrompt(promptId: prompt.promptId, response: response)
-            appState.selectedSessionStream?.clearPendingPrompt(summary: summary)
+            defer { isSubmitting = false }
+            do {
+                try await appState.respondToPrompt(promptId: prompt.promptId, response: response)
+                appState.selectedSessionStream?.clearPendingPrompt(summary: summary)
+            } catch {
+                // Send failed -- leave the prompt visible so user can retry.
+                // isSubmitting is reset by the defer above.
+            }
         }
     }
 }
