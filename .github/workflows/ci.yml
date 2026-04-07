@@ -43,6 +43,9 @@ jobs:
       - name: Select Xcode
         run: sudo xcode-select -s /Applications/Xcode_16.app
 
+      - name: Show available SDKs
+        run: xcodebuild -showsdks
+
       - name: Run Swift package tests
         working-directory: client/swift/CCCommanderPackage
         run: swift test
@@ -55,9 +58,12 @@ jobs:
             -destination 'platform=macOS' \
             -quiet
 
+      - name: Install iOS platform
+        # macos-15 runners ship Xcode 16 but without the iOS platform.
+        # Download it on demand (~3 GB, ~1 min).
+        run: sudo xcodebuild -downloadPlatform iOS
+
       - name: Build iOS app
-        # Use generic iOS device target so we don't need a simulator runtime
-        # installed on the runner (saves ~1GB download).
         run: |
           xcodebuild build \
             -project CCCommander.xcodeproj \
