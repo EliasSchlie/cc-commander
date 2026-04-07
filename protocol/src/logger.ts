@@ -58,8 +58,13 @@ export interface LoggerOptions {
   sink?: LogSink;
 }
 
+/**
+ * Sinks consume the record object, not a pre-stringified line. This
+ * lets pretty-mode console sinks skip a JSON.stringify→JSON.parse
+ * round-trip on every line, which adds up under stream-text storms.
+ */
 export interface LogSink {
-  write(line: string): void;
+  write(record: Record<string, unknown>): void;
 }
 
 /**
@@ -71,32 +76,26 @@ class ConsoleSink implements LogSink {
   constructor(pretty: boolean) {
     this.pretty = pretty;
   }
-  write(line: string): void {
+  write(record: Record<string, unknown>): void {
     if (this.pretty) {
-      // line is JSON; reformat for human eyes
-      try {
-        const obj = JSON.parse(line) as Record<string, unknown>;
-        const ts = String(obj.ts ?? "");
-        const lvl = String(obj.level ?? "info")
-          .toUpperCase()
-          .padEnd(5);
-        const comp = String(obj.component ?? "");
-        const msg = String(obj.msg ?? "");
-        const rest: Record<string, unknown> = {};
-        for (const k of Object.keys(obj)) {
-          if (k === "ts" || k === "level" || k === "component" || k === "msg")
-            continue;
-          rest[k] = obj[k];
-        }
-        const tail =
-          Object.keys(rest).length > 0 ? " " + JSON.stringify(rest) : "";
-        process.stdout.write(`${ts} ${lvl} [${comp}] ${msg}${tail}\n`);
-        return;
-      } catch {
-        // fall through to raw write
+      const ts = String(record.ts ?? "");
+      const lvl = String(record.level ?? "info")
+        .toUpperCase()
+        .padEnd(5);
+      const comp = String(record.component ?? "");
+      const msg = String(record.msg ?? "");
+      const rest: Record<string, unknown> = {};
+      for (const k of Object.keys(record)) {
+        if (k === "ts" || k === "level" || k === "component" || k === "msg")
+          continue;
+        rest[k] = record[k];
       }
+      const tail =
+        Object.keys(rest).length > 0 ? " " + safeStringify(rest) : "";
+      process.stdout.write(`${ts} ${lvl} [${comp}] ${msg}${tail}\n`);
+      return;
     }
-    process.stdout.write(line + "\n");
+    process.stdout.write(safeStringify(record) + "\n");
   }
 }
 
@@ -160,8 +159,8 @@ class FileSink implements LogSink {
     this.open();
   }
 
-  write(line: string): void {
-    const buf = line + "\n";
+  write(record: Record<string, unknown>): void {
+    const buf = safeStringify(record) + "\n";
     if (this.fd === null) return;
     try {
       writeSync(this.fd, buf);
@@ -183,8 +182,28 @@ class TeeSink implements LogSink {
   constructor(sinks: LogSink[]) {
     this.sinks = sinks;
   }
-  write(line: string): void {
-    for (const s of this.sinks) s.write(line);
+  write(record: Record<string, unknown>): void {
+    for (const s of this.sinks) s.write(record);
+  }
+}
+
+/**
+ * JSON.stringify with a fallback to a sanitized record on cycles or
+ * non-serializable values (BigInt). Hoisted so console + file sinks
+ * share one path; before this lived inside Logger.log and forced
+ * sinks to take pre-stringified strings.
+ */
+function safeStringify(record: Record<string, unknown>): string {
+  try {
+    return JSON.stringify(record);
+  } catch (err) {
+    return JSON.stringify({
+      ts: record.ts,
+      level: record.level,
+      component: record.component,
+      msg: record.msg,
+      serialize_error: (err as Error).message,
+    });
   }
 }
 
@@ -300,25 +319,12 @@ export class Logger {
         }
       }
     }
-    let line: string;
     try {
-      line = JSON.stringify(record);
-    } catch (err) {
-      // Fallback if a binding is non-serializable (cycles, BigInt, ...).
-      line = JSON.stringify({
-        ts: record.ts,
-        level,
-        component: this.component,
-        msg,
-        serialize_error: (err as Error).message,
-      });
-    }
-    try {
-      this.sink.write(line);
+      this.sink.write(record);
     } catch {
       // Last-ditch -- never let logging crash the caller.
       try {
-        process.stderr.write(line + "\n");
+        process.stderr.write(safeStringify(record) + "\n");
       } catch {
         /* swallow */
       }

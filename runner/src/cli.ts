@@ -362,11 +362,9 @@ async function cmdRun(flags: Record<string, string | boolean>): Promise<void> {
 async function cmdStatus(
   flags: Record<string, string | boolean>,
 ): Promise<void> {
+  // readConfig handles the missing-file case (and TOCTOU): no need
+  // for a redundant existsSync probe before it.
   const configPath = String(flags.config ?? DEFAULT_CONFIG_PATH);
-  if (!existsSync(configPath)) {
-    log.error("no config", { path: configPath });
-    process.exit(1);
-  }
   const cfg = readConfig(configPath);
   const currentVersion = detectRunnerVersion();
   log.info("runner config", {

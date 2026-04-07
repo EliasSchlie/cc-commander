@@ -238,9 +238,15 @@ export class HubDb {
    * history.
    */
   listFailedSessionsForAccount(accountId: string, limit = 50): SessionRow[] {
+    // ORDER BY ended_at (not COALESCE w/ last_activity): every row in
+    // the result set has status='error', and updateSessionStatus +
+    // markSessionsErrorForMachine both stamp ended_at when transitioning
+    // into 'error', so the column is non-null here. Plain ended_at
+    // matches the (account_id, status, ended_at) index exactly, so the
+    // sort is satisfied by the index walk -- no extra filesort step.
     const rows = this.db
       .prepare(
-        "SELECT id, account_id, machine_id, directory, status, last_activity, last_message_preview, sdk_session_id, created_at, error_message, ended_at FROM sessions WHERE account_id = ? AND status = 'error' ORDER BY COALESCE(ended_at, last_activity) DESC LIMIT ?",
+        "SELECT id, account_id, machine_id, directory, status, last_activity, last_message_preview, sdk_session_id, created_at, error_message, ended_at FROM sessions WHERE account_id = ? AND status = 'error' ORDER BY ended_at DESC LIMIT ?",
       )
       .all(accountId, limit) as any[];
     return rows.map(toSessionRow);
@@ -269,48 +275,40 @@ export class HubDb {
     status: SessionStatus,
     preview?: string,
   ): void {
-    // Track terminal transitions (error / idle-after-running) by
-    // stamping ended_at, and tag error rows with the preview as the
-    // human-readable error_message. The hub-side message dispatch
-    // already passes the error string as `preview` for status=error,
-    // so this hook captures lifecycle without changing call sites.
+    // One UPDATE for all five (status × has-preview) combinations.
+    // Previous version had 5 nearly-identical SQL branches and a
+    // subtle inconsistency: the preview+non-terminal branch left
+    // ended_at intact, while the no-preview+non-terminal branch
+    // cleared it. Unified rules:
+    //   - last_message_preview: replace if a preview was passed,
+    //     otherwise keep the prior value
+    //   - error_message: stamp on transition into 'error', untouched
+    //     otherwise (so a recovered session keeps its diagnostic
+    //     trail for post-mortem)
+    //   - ended_at: stamped on transitions into terminal status
+    //     (error/idle), cleared on transitions into a non-terminal
+    //     status (so a running→error→running recovery doesn't show
+    //     up as "still terminal" in post-mortem queries)
     const isTerminal = status === "error" || status === "idle";
-    if (preview !== undefined) {
-      if (status === "error") {
-        this.db
-          .prepare(
-            "UPDATE sessions SET status = ?, last_activity = datetime('now'), last_message_preview = ?, error_message = ?, ended_at = datetime('now') WHERE id = ?",
-          )
-          .run(status, preview, preview, sessionId);
-      } else if (isTerminal) {
-        this.db
-          .prepare(
-            "UPDATE sessions SET status = ?, last_activity = datetime('now'), last_message_preview = ?, ended_at = datetime('now') WHERE id = ?",
-          )
-          .run(status, preview, sessionId);
-      } else {
-        this.db
-          .prepare(
-            "UPDATE sessions SET status = ?, last_activity = datetime('now'), last_message_preview = ? WHERE id = ?",
-          )
-          .run(status, preview, sessionId);
-      }
-    } else if (isTerminal) {
-      this.db
-        .prepare(
-          "UPDATE sessions SET status = ?, last_activity = datetime('now'), ended_at = datetime('now') WHERE id = ?",
-        )
-        .run(status, sessionId);
-    } else {
-      // Re-entering a non-terminal status (e.g. running after
-      // waiting_for_input) clears any prior ended_at so post-mortem
-      // queries don't mis-classify a recovered session as terminal.
-      this.db
-        .prepare(
-          "UPDATE sessions SET status = ?, last_activity = datetime('now'), ended_at = NULL WHERE id = ?",
-        )
-        .run(status, sessionId);
-    }
+    const previewParam = preview ?? null;
+    this.db
+      .prepare(
+        `UPDATE sessions SET
+           status = ?,
+           last_activity = datetime('now'),
+           last_message_preview = COALESCE(?, last_message_preview),
+           error_message = CASE WHEN ? = 'error' THEN COALESCE(?, error_message) ELSE error_message END,
+           ended_at = CASE WHEN ? = 1 THEN datetime('now') ELSE NULL END
+         WHERE id = ?`,
+      )
+      .run(
+        status,
+        previewParam,
+        status,
+        previewParam,
+        isTerminal ? 1 : 0,
+        sessionId,
+      );
   }
 
   updateSessionSdkId(sessionId: string, sdkSessionId: string): void {

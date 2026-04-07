@@ -37,16 +37,25 @@ export interface RouteContext {
    * in hub.ts; the literal carries only counts and ids that already
    * appear in metrics or are derivable from public message flow.
    */
-  debugSnapshot(): {
-    version: string;
-    startedAt: string;
-    uptimeSec: number;
-    pid: number;
-    port: number;
-    runners: { count: number; machineIds: string[] };
-    clients: { count: number; accounts: number };
-    pendingHistory: number;
-    memory: NodeJS.MemoryUsage;
-    metrics: Record<string, number>;
-  };
+  debugSnapshot(): DebugSnapshot;
+}
+
+/**
+ * Shape of /api/debug/state's payload (minus the per-account
+ * recentFailedSessions slice, which the route handler appends).
+ * Defined here so Hub.debugSnapshot() and RouteContext stay in sync
+ * automatically -- a field added to one and not the other is a
+ * compile error.
+ */
+export interface DebugSnapshot {
+  version: string;
+  startedAt: string;
+  uptimeSec: number;
+  pid: number;
+  port: number;
+  runners: { count: number; machineIds: string[] };
+  clients: { count: number; accounts: number };
+  pendingHistory: number;
+  memory: NodeJS.MemoryUsage;
+  metrics: Record<string, number>;
 }

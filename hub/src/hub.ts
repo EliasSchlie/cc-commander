@@ -19,7 +19,7 @@ import { handleAuthEndpoint, handleRefreshEndpoint } from "./routes/auth.ts";
 import { handleCreateMachine } from "./routes/machines.ts";
 import { handleHealth, handleVersion } from "./routes/health.ts";
 import { handleDebugState } from "./routes/debug.ts";
-import type { RouteContext } from "./routes/types.ts";
+import type { DebugSnapshot, RouteContext } from "./routes/types.ts";
 import { clientIp, extractBearerToken } from "./util/http.ts";
 import {
   handleClientMessage,
@@ -274,18 +274,7 @@ export class Hub {
    * any per-user content. Designed to be safe to surface to anyone who
    * already has a hub-issued JWT.
    */
-  debugSnapshot(): {
-    version: string;
-    startedAt: string;
-    uptimeSec: number;
-    pid: number;
-    port: number;
-    runners: { count: number; machineIds: string[] };
-    clients: { count: number; accounts: number };
-    pendingHistory: number;
-    memory: NodeJS.MemoryUsage;
-    metrics: Record<string, number>;
-  } {
+  debugSnapshot(): DebugSnapshot {
     return {
       version: this.config.version ?? "",
       startedAt: this.startedAt,

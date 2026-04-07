@@ -28,9 +28,10 @@ function envStr(name: string, fallback: string): string {
 
 // ── Subcommand dispatch ────────────────────────────────────────────────
 //
-// Default (no args, or `start`) runs the hub. `status` and `validate`
-// are debug entry points so a Claude Code session (or operator) can
-// introspect the hub without having to spin up the listener.
+// Default (no args) runs the hub. `status` is a debug entry point so a
+// Claude Code session (or operator) can introspect a running hub.
+// `--dry-run` validates env + DB without binding the listener -- useful
+// for verifying a deployment before taking the port.
 
 const sub = process.argv[2];
 
@@ -43,7 +44,7 @@ if (sub === "status") {
   process.exit(0);
 }
 
-const dryRun = sub === "validate" || hasFlag("--dry-run");
+const dryRun = hasFlag("--dry-run");
 
 const port = envInt("PORT", 3000);
 const dbPath = envStr("HUB_DB_PATH", "./hub.db");
