@@ -193,13 +193,26 @@ describe("session lifecycle", () => {
           type: "assistant",
           message: {
             content: [
-              { type: "tool_use", name: "Bash", input: { command: "ls -la" } },
+              {
+                type: "tool_use",
+                id: "toolu_01",
+                name: "Bash",
+                input: { command: "ls -la" },
+              },
             ],
           },
         },
         {
           type: "user",
-          message: { content: [{ type: "tool_result", content: "file1.txt" }] },
+          message: {
+            content: [
+              {
+                type: "tool_result",
+                tool_use_id: "toolu_01",
+                content: "file1.txt",
+              },
+            ],
+          },
         },
         { type: "result", session_id: "sdk-2", num_turns: 1, duration_ms: 200 },
       ]),
@@ -223,7 +236,10 @@ describe("session lifecycle", () => {
     const toolCall = allMsgs.find((m) => m.type === "tool_call");
     assert.ok(toolCall);
     assert.equal(toolCall.display, "$ ls -la");
-    assert.ok(allMsgs.find((m) => m.type === "tool_result"));
+    assert.equal(toolCall.toolCallId, "toolu_01");
+    const toolResult = allMsgs.find((m) => m.type === "tool_result");
+    assert.ok(toolResult);
+    assert.equal(toolResult.toolCallId, "toolu_01");
 
     runner.disconnect();
   });

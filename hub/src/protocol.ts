@@ -123,6 +123,7 @@ export interface StreamTextMsg {
 export interface ToolCallMsg {
   type: "tool_call";
   sessionId: string;
+  toolCallId: string;
   toolName: string;
   display: string;
 }
@@ -130,6 +131,7 @@ export interface ToolCallMsg {
 export interface ToolResultMsg {
   type: "tool_result";
   sessionId: string;
+  toolCallId: string;
   content: string;
 }
 
@@ -236,8 +238,8 @@ const CLIENT_MSG_REQUIRED_FIELDS: Record<string, string[]> = {
 
 const RUNNER_MSG_REQUIRED_FIELDS: Record<string, string[]> = {
   stream_text: ["sessionId", "content"],
-  tool_call: ["sessionId", "toolName", "display"],
-  tool_result: ["sessionId", "content"],
+  tool_call: ["sessionId", "toolCallId", "toolName", "display"],
+  tool_result: ["sessionId", "toolCallId", "content"],
   user_prompt: ["sessionId", "promptId", "toolName"],
   session_status: ["sessionId", "status"],
   session_done: ["sessionId", "sdkSessionId"],

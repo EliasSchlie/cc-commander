@@ -5,8 +5,8 @@ public enum ServerMessage: Sendable {
     case sessionList([SessionMeta])
     case machineList([MachineInfo])
     case streamText(sessionId: String, content: String)
-    case toolCall(sessionId: String, toolName: String, display: String)
-    case toolResult(sessionId: String, content: String)
+    case toolCall(sessionId: String, toolCallId: String, toolName: String, display: String)
+    case toolResult(sessionId: String, toolCallId: String, content: String)
     case userPrompt(UserPromptPayload)
     case sessionStatus(sessionId: String, status: SessionStatus, lastMessagePreview: String?)
     case sessionDone(SessionDonePayload)
@@ -31,7 +31,7 @@ extension ServerMessage: Decodable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case type, sessions, machines, sessionId, content, toolName, display
+        case type, sessions, machines, sessionId, content, toolCallId, toolName, display
         case status, lastMessagePreview, error, requestId, messages, message
     }
 
@@ -55,6 +55,7 @@ extension ServerMessage: Decodable {
         case .toolCall:
             self = .toolCall(
                 sessionId: try c.decode(String.self, forKey: .sessionId),
+                toolCallId: try c.decode(String.self, forKey: .toolCallId),
                 toolName: try c.decode(String.self, forKey: .toolName),
                 display: try c.decode(String.self, forKey: .display)
             )
@@ -62,6 +63,7 @@ extension ServerMessage: Decodable {
         case .toolResult:
             self = .toolResult(
                 sessionId: try c.decode(String.self, forKey: .sessionId),
+                toolCallId: try c.decode(String.self, forKey: .toolCallId),
                 content: try c.decode(String.self, forKey: .content)
             )
 

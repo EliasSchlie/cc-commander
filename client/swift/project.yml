@@ -21,11 +21,22 @@ targets:
         product: CCNetworking
       - package: CCCommanderPackage
         product: CCApp
+    info:
+      path: CCCommander/Info.plist
+      properties:
+        CFBundleDisplayName: CC Commander
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        LSMinimumSystemVersion: $(MACOSX_DEPLOYMENT_TARGET)
+        HUB_BASE_URL: $(HUB_BASE_URL)
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.cc-commander.app
-        INFOPLIST_KEY_CFBundleDisplayName: CC Commander
         SWIFT_VERSION: "5.9"
-        GENERATE_INFOPLIST_FILE: YES
         CURRENT_PROJECT_VERSION: 1
         MARKETING_VERSION: 0.1.0
+      configs:
+        Debug:
+          HUB_BASE_URL: http://localhost:3000
+        Release:
+          HUB_BASE_URL: https://hub.cc-commander.com

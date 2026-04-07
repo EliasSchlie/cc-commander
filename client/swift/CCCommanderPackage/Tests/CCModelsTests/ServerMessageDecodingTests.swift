@@ -82,15 +82,16 @@ struct ServerMessageDecodingTests {
     // Prevents: tool calls invisible during generation
     @Test func decodesToolCall() throws {
         let json = """
-        {"type": "tool_call", "sessionId": "s1", "toolName": "Read", "display": "Reading file.swift"}
+        {"type": "tool_call", "sessionId": "s1", "toolCallId": "tc_abc", "toolName": "Read", "display": "Reading file.swift"}
         """.data(using: .utf8)!
 
         let msg = try decoder.decode(ServerMessage.self, from: json)
-        guard case .toolCall(let sid, let name, let display) = msg else {
+        guard case .toolCall(let sid, let tcId, let name, let display) = msg else {
             Issue.record("Expected toolCall, got \\(msg)")
             return
         }
         #expect(sid == "s1")
+        #expect(tcId == "tc_abc")
         #expect(name == "Read")
         #expect(display == "Reading file.swift")
     }
@@ -98,15 +99,16 @@ struct ServerMessageDecodingTests {
     // Prevents: tool results not shown
     @Test func decodesToolResult() throws {
         let json = """
-        {"type": "tool_result", "sessionId": "s1", "content": "file contents here"}
+        {"type": "tool_result", "sessionId": "s1", "toolCallId": "tc_abc", "content": "file contents here"}
         """.data(using: .utf8)!
 
         let msg = try decoder.decode(ServerMessage.self, from: json)
-        guard case .toolResult(let sid, let content) = msg else {
+        guard case .toolResult(let sid, let tcId, let content) = msg else {
             Issue.record("Expected toolResult, got \\(msg)")
             return
         }
         #expect(sid == "s1")
+        #expect(tcId == "tc_abc")
         #expect(content == "file contents here")
     }
 

@@ -20,7 +20,7 @@ struct SessionStreamTests {
     @Test func addToolCallFlushesPendingText() {
         let stream = SessionStream(sessionId: "s1")
         stream.appendText("Some text")
-        stream.addToolCall(toolName: "Read", display: "Reading file")
+        stream.addToolCall(toolCallId: "tc1", toolName: "Read", display: "Reading file")
         #expect(stream.pendingText.isEmpty)
         #expect(stream.entries.count == 2)
         if case .assistantText(_, let text) = stream.entries[0] {
@@ -28,7 +28,8 @@ struct SessionStreamTests {
         } else {
             Issue.record("Expected assistantText")
         }
-        if case .toolCall(_, let name, let display, _, _) = stream.entries[1] {
+        if case .toolCall(_, let tcId, let name, let display, _) = stream.entries[1] {
+            #expect(tcId == "tc1")
             #expect(name == "Read")
             #expect(display == "Reading file")
         } else {
@@ -36,69 +37,59 @@ struct SessionStreamTests {
         }
     }
 
-    // Prevents: tool result not attached to its tool call
-    @Test func addToolResultUpdatesLastToolCall() {
+    // Prevents: tool result attached by position, parallel tool calls misattribute (#9)
+    @Test func toolResultMatchesByToolCallId() {
         let stream = SessionStream(sessionId: "s1")
-        stream.addToolCall(toolName: "Bash", display: "Running tests")
-        stream.addToolResult(content: "All tests pass")
-        if case .toolCall(_, _, _, let result, _) = stream.entries[0] {
-            #expect(result == "All tests pass")
+        stream.addToolCall(toolCallId: "A", toolName: "Read", display: "A")
+        stream.addToolCall(toolCallId: "B", toolName: "Read", display: "B")
+        // Result for A arrives AFTER B was emitted -- the parallel-tool-calls scenario
+        stream.addToolResult(toolCallId: "A", content: "result-A")
+        stream.addToolResult(toolCallId: "B", content: "result-B")
+
+        if case .toolCall(_, let tcId, _, _, let result) = stream.entries[0] {
+            #expect(tcId == "A")
+            #expect(result == "result-A")
         } else {
-            Issue.record("Expected toolCall with result")
+            Issue.record("Expected toolCall A")
+        }
+        if case .toolCall(_, let tcId, _, _, let result) = stream.entries[1] {
+            #expect(tcId == "B")
+            #expect(result == "result-B")
+        } else {
+            Issue.record("Expected toolCall B")
         }
     }
 
-    // Prevents: tool result when no tool call crashes
-    @Test func addToolResultWithNoToolCallIsNoOp() {
+    // Prevents: tool result with unknown id silently mutating wrong entry
+    @Test func addToolResultWithUnknownIdIsIgnored() {
         let stream = SessionStream(sessionId: "s1")
-        stream.addToolResult(content: "orphan result")
-        #expect(stream.entries.isEmpty)
+        stream.addToolCall(toolCallId: "real", toolName: "Read", display: "x")
+        stream.addToolResult(toolCallId: "ghost", content: "orphan")
+        if case .toolCall(_, _, _, _, let result) = stream.entries[0] {
+            #expect(result == nil)
+        } else {
+            Issue.record("Expected toolCall")
+        }
     }
 
-    // Prevents: turn end doesn't flush text, text is lost
-    @Test func flushTurnFlushesPendingTextAndCollapsesToolCalls() {
+    // Prevents: turn end doesn't flush text or advance turn boundary
+    @Test func flushTurnFlushesPendingTextAndAdvancesTurn() {
         let stream = SessionStream(sessionId: "s1")
         stream.appendText("Response text")
-        stream.addToolCall(toolName: "Read", display: "Read file")
+        stream.addToolCall(toolCallId: "t1", toolName: "Read", display: "Read file")
         stream.appendText("More text")
+
         stream.flushTurn()
 
-        // pendingText should be flushed
         #expect(stream.pendingText.isEmpty)
-
-        // Tool calls should be collapsed
-        for entry in stream.entries {
-            if case .toolCall(_, _, _, _, let collapsed) = entry {
-                #expect(collapsed == true)
-            }
-        }
-
         // Should have: assistantText, toolCall, assistantText
         #expect(stream.entries.count == 3)
-    }
+        #expect(stream.currentTurnStartIndex == stream.entries.count)
 
-    // Prevents: tool calls stay expanded after generation ends
-    @Test func flushTurnCollapsesAllToolCalls() {
-        let stream = SessionStream(sessionId: "s1")
-        stream.addToolCall(toolName: "Read", display: "File 1")
-        stream.addToolCall(toolName: "Read", display: "File 2")
-        stream.addToolCall(toolName: "Bash", display: "Command")
-
-        // Before flush, all should be expanded
-        for entry in stream.entries {
-            if case .toolCall(_, _, _, _, let collapsed) = entry {
-                #expect(collapsed == false)
-            }
-        }
-
+        // A new turn appends past the boundary
+        stream.appendText("New turn text")
         stream.flushTurn()
-
-        // After flush, all should be collapsed
-        for entry in stream.entries {
-            if case .toolCall(_, _, _, _, let collapsed) = entry {
-                #expect(collapsed == true)
-            }
-        }
+        #expect(stream.entries.count == 4)
     }
 
     // Prevents: user prompt not stored, user never sees the question
@@ -142,6 +133,15 @@ struct SessionStreamTests {
         }
     }
 
+    // Prevents: error in middle of streaming text loses the text
+    @Test func errorFlushesPendingText() {
+        let stream = SessionStream(sessionId: "s1")
+        stream.appendText("Working")
+        stream.addError("Boom")
+        #expect(stream.pendingText.isEmpty)
+        #expect(stream.entries.count == 2)
+    }
+
     // Prevents: history not loaded from opaque SDK messages
     @Test func loadHistoryParsesUserAndAssistantMessages() {
         let stream = SessionStream(sessionId: "s1")
@@ -156,6 +156,8 @@ struct SessionStreamTests {
         if case .assistantText(_, let text) = stream.entries[1] {
             #expect(text == "Hi there")
         }
+        // History counts as completed turn
+        #expect(stream.currentTurnStartIndex == 2)
     }
 
     // Prevents: isGenerating not accurate during running status

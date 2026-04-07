@@ -74,7 +74,7 @@ struct AppStateTests {
     // Prevents: tool call not dispatched
     @Test func toolCallDispatchesToSession() {
         let state = makeAppState()
-        state.handleMessage(.toolCall(sessionId: "s1", toolName: "Read", display: "Reading file"))
+        state.handleMessage(.toolCall(sessionId: "s1", toolCallId: "tc1", toolName: "Read", display: "Reading file"))
         let stream = state.sessionStreams["s1"]
         #expect(stream?.entries.count == 1)
     }
@@ -134,25 +134,19 @@ struct AppStateTests {
         #expect(state.sessionStreams["s1"]?.pendingText == "ab")
     }
 
-    // Prevents: turn end doesn't flush pending text in stream
+    // Prevents: turn end doesn't flush text or advance turn boundary
     @Test func statusChangeFromRunningTriggersFlushTurn() {
         let state = makeAppState()
         state.handleMessage(.sessionList(makeSessions()))
-        // Simulate a running session with pending text
         let stream = SessionStream(sessionId: "s1")
         stream.status = .running
         stream.appendText("Some output")
-        stream.addToolCall(toolName: "Bash", display: "Running tests")
+        stream.addToolCall(toolCallId: "tc1", toolName: "Bash", display: "Running tests")
         state.sessionStreams["s1"] = stream
 
         state.handleMessage(.sessionStatus(sessionId: "s1", status: .idle, lastMessagePreview: nil))
 
-        // Text should be flushed and tool calls collapsed
         #expect(stream.pendingText.isEmpty)
-        for entry in stream.entries {
-            if case .toolCall(_, _, _, _, let collapsed) = entry {
-                #expect(collapsed == true)
-            }
-        }
+        #expect(stream.currentTurnStartIndex == stream.entries.count)
     }
 }

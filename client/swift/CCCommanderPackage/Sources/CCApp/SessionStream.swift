@@ -5,7 +5,7 @@ import CCModels
 /// A single entry in the session's chronological log.
 public enum SessionEntry: Identifiable {
     case assistantText(id: String, text: String)
-    case toolCall(id: String, toolName: String, display: String, result: String?, collapsed: Bool)
+    case toolCall(id: String, toolCallId: String, toolName: String, display: String, result: String?)
     case userMessage(id: String, text: String)
     case userPromptResponse(id: String, summary: String)
     case error(id: String, message: String)
@@ -19,6 +19,13 @@ public enum SessionEntry: Identifiable {
         case .error(let id, _): return id
         }
     }
+
+    /// Set the result on a `.toolCall` entry. No-op for other cases.
+    mutating func setResult(_ content: String) {
+        if case .toolCall(let id, let tcId, let name, let display, _) = self {
+            self = .toolCall(id: id, toolCallId: tcId, toolName: name, display: display, result: content)
+        }
+    }
 }
 
 /// Per-session live state. Accumulates streaming events into a chronological log.
@@ -27,9 +34,19 @@ public enum SessionEntry: Identifiable {
 public final class SessionStream {
     public let sessionId: String
     public var entries: [SessionEntry] = []
+
+    /// Live, in-progress assistant text from the current `stream_text` deltas.
+    /// Read by a dedicated sub-view so per-token mutation does not invalidate
+    /// the parent ForEach over `entries`.
     public var pendingText: String = ""
+
     public var status: SessionStatus = .idle
     public var pendingPrompt: UserPromptPayload?
+
+    /// Index in `entries` where the current turn began. Tool calls at or after
+    /// this index are considered part of the current (in-progress) turn and
+    /// rendered expanded; earlier ones are collapsed by default.
+    public var currentTurnStartIndex: Int = 0
 
     public var isGenerating: Bool { status == .running }
 
@@ -38,29 +55,32 @@ public final class SessionStream {
     }
 
     public func appendText(_ text: String) {
+        // String.append is amortized O(1) (exponential capacity growth) when
+        // uniquely referenced. += compiles to the same op.
         pendingText += text
     }
 
-    public func addToolCall(toolName: String, display: String) {
+    public func addToolCall(toolCallId: String, toolName: String, display: String) {
         flushPendingText()
         entries.append(.toolCall(
             id: UUID().uuidString,
+            toolCallId: toolCallId,
             toolName: toolName,
             display: display,
-            result: nil,
-            collapsed: false
+            result: nil
         ))
     }
 
-    public func addToolResult(content: String) {
-        guard let lastIdx = entries.lastIndex(where: {
-            if case .toolCall = $0 { return true }
+    public func addToolResult(toolCallId: String, content: String) {
+        guard let idx = entries.lastIndex(where: {
+            if case .toolCall(_, let tcId, _, _, _) = $0 { return tcId == toolCallId }
             return false
-        }) else { return }
-
-        if case .toolCall(let id, let name, let display, _, let collapsed) = entries[lastIdx] {
-            entries[lastIdx] = .toolCall(id: id, toolName: name, display: display, result: content, collapsed: collapsed)
+        }) else {
+            // Protocol violation: log so orphan results aren't silently swallowed.
+            print("[SessionStream] tool_result for unknown toolCallId: \(toolCallId)")
+            return
         }
+        entries[idx].setResult(content)
     }
 
     public func setPendingPrompt(_ payload: UserPromptPayload) {
@@ -80,7 +100,7 @@ public final class SessionStream {
 
     public func flushTurn() {
         flushPendingText()
-        collapseToolCalls()
+        currentTurnStartIndex = entries.count
     }
 
     public func loadHistory(_ messages: [AnyCodable]) {
@@ -96,6 +116,7 @@ public final class SessionStream {
                 }
             }
         }
+        currentTurnStartIndex = entries.count
     }
 
     // MARK: - Private
@@ -104,13 +125,5 @@ public final class SessionStream {
         guard !pendingText.isEmpty else { return }
         entries.append(.assistantText(id: UUID().uuidString, text: pendingText))
         pendingText = ""
-    }
-
-    private func collapseToolCalls() {
-        for i in entries.indices {
-            if case .toolCall(let id, let name, let display, let result, false) = entries[i] {
-                entries[i] = .toolCall(id: id, toolName: name, display: display, result: result, collapsed: true)
-            }
-        }
     }
 }

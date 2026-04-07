@@ -98,11 +98,11 @@ public final class AppState {
         case .streamText(let sessionId, let content):
             streamFor(sessionId).appendText(content)
 
-        case .toolCall(let sessionId, let toolName, let display):
-            streamFor(sessionId).addToolCall(toolName: toolName, display: display)
+        case .toolCall(let sessionId, let toolCallId, let toolName, let display):
+            streamFor(sessionId).addToolCall(toolCallId: toolCallId, toolName: toolName, display: display)
 
-        case .toolResult(let sessionId, let content):
-            streamFor(sessionId).addToolResult(content: content)
+        case .toolResult(let sessionId, let toolCallId, let content):
+            streamFor(sessionId).addToolResult(toolCallId: toolCallId, content: content)
 
         case .userPrompt(let payload):
             streamFor(payload.sessionId).setPendingPrompt(payload)

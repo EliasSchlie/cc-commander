@@ -4,23 +4,19 @@ struct ToolCallView: View {
     let toolName: String
     let display: String
     let result: String?
-    let collapsed: Bool
+    let isCurrentTurn: Bool
 
-    @State private var isExpanded: Bool
+    /// `nil` means follow `isCurrentTurn` (auto-collapse when the turn ends).
+    /// Set to a concrete value once the user toggles, sticking to their choice.
+    @State private var userToggled: Bool? = nil
 
-    init(toolName: String, display: String, result: String?, collapsed: Bool) {
-        self.toolName = toolName
-        self.display = display
-        self.result = result
-        self.collapsed = collapsed
-        self._isExpanded = State(initialValue: !collapsed)
-    }
+    private var isExpanded: Bool { userToggled ?? isCurrentTurn }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             Button {
                 withAnimation(.easeInOut(duration: 0.2)) {
-                    isExpanded.toggle()
+                    userToggled = !isExpanded
                 }
             } label: {
                 HStack(spacing: 6) {
@@ -59,9 +55,6 @@ struct ToolCallView: View {
         }
         .background(Color(white: 0.5, opacity: 0.05), in: RoundedRectangle(cornerRadius: 8))
         .padding(.horizontal, 8)
-        .onChange(of: collapsed) { _, newValue in
-            if newValue { isExpanded = false }
-        }
     }
 
     private var toolIcon: String {
