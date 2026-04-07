@@ -103,7 +103,11 @@ jobs:
       # update flow silently breaks because /api/version returns "".
       - name: Verify VERSION baked into image
         run: |
-          IMG="$(echo '${{ steps.meta.outputs.tags }}' | head -n1)"
+          # docker/metadata-action emits tags either newline- or
+          # comma-separated depending on version. Normalise both into
+          # newlines and pick the first non-empty entry.
+          IMG="$(printf '%s' '${{ steps.meta.outputs.tags }}' | tr ',' '\n' | sed '/^$/d' | head -n1)"
+          echo "Verifying $IMG"
           docker pull "$IMG"
           BAKED="$(docker run --rm --entrypoint sh "$IMG" -c 'printf %s "$VERSION"')"
           EXPECTED='${{ steps.meta.outputs.version }}'

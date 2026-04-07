@@ -15,6 +15,11 @@ services:
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
       PORT: "3000"
       HUB_DB_PATH: /data/hub.db
+      # Optional. When building locally (not via CI), set VERSION in
+      # .env to the git SHA so runners can self-update against this
+      # hub. CI builds bake VERSION via the Dockerfile ARG instead and
+      # this passthrough is a no-op.
+      VERSION: ${VERSION:-}
     volumes:
       - hub-data:/data
 
