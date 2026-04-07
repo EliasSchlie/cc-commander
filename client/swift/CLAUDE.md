@@ -28,14 +28,21 @@ cd client/swift/CCCommanderPackage && swift test
 # Build the headless driver
 cd client/swift/CCCommanderPackage && swift build --product ccc-shadow
 
-# Build the macOS app (CI uses this)
+# Build the macOS app (local dev)
 cd client/swift && xcodebuild build \
   -project CCCommander.xcodeproj \
   -scheme CCCommander_macOS \
   -destination 'platform=macOS' \
-  CODE_SIGN_IDENTITY=- CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=NO \
   -quiet
 ```
+
+**Do NOT pass `DEVELOPMENT_TEAM=` or `CODE_SIGN_IDENTITY=-` for local builds.**
+Both project.yml and the generated xcodeproj set the team to a stable
+Apple Developer ID. Overriding either flag forces ad-hoc signing, which
+changes the binary's code signature on every rebuild and makes the
+macOS Keychain pop "allow / deny" on every launch (the JWT's ACL is
+pinned to the previous binary's signature). CI is the only place that
+overrides these flags, because the GitHub runner has no Apple cert.
 
 iOS is **not** built in CI -- macos-15 ships the iOS 18 SDK but no
 simulator runtime, and downloading one is slow + flaky. Cross-platform

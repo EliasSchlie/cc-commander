@@ -35,6 +35,15 @@ targets:
         SWIFT_VERSION: "5.9"
         CURRENT_PROJECT_VERSION: 1
         MARKETING_VERSION: 0.1.0
+        # Stable Apple Developer team so every local rebuild signs with
+        # the same identity. Without this, xcodegen regeneration drops
+        # the team and Xcode falls back to ad-hoc signing -- the binary's
+        # code signature changes on every rebuild, the keychain ACL on
+        # the previously-stored JWT no longer matches, and macOS pops
+        # "allow / deny" on every launch. CI overrides this back to
+        # empty for the GitHub runner (no Apple cert available).
+        DEVELOPMENT_TEAM: Q2U8K9N3BL
+        CODE_SIGN_STYLE: Automatic
       configs:
         Debug:
           HUB_BASE_URL: http://localhost:3000

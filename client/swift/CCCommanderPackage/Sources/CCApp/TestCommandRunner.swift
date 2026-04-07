@@ -23,7 +23,17 @@ public final class TestCommandRunner {
     private let harness: TestHarness
     private let path: String
     private var byteOffset: Int = 0
-    private var carry: String = ""
+    /// Carry as raw bytes, not `String`, so a multi-byte UTF-8 codepoint
+    /// split across two reads survives the chunk boundary. Decoding only
+    /// happens after lines are split out, where each line is guaranteed
+    /// not to straddle a read.
+    private var carry: Data = Data()
+    /// Set after `carry` was dropped because a single line exceeded
+    /// `maxCarryBytes`. While true, every byte read is discarded until
+    /// the next newline -- otherwise the *tail* of the oversized line
+    /// would be parsed as if it were a fresh command and produce a
+    /// misleading `command line is not a JSON object` error.
+    private var skipToNextNewline: Bool = false
     private var stopped: Bool = false
 
     public init(harness: TestHarness, path: String) {
@@ -72,13 +82,13 @@ public final class TestCommandRunner {
             fm.createFile(atPath: path, contents: nil)
         }
         byteOffset = 0
-        carry = ""
+        carry = Data()
     }
 
     /// Hard cap on `carry` so a misbehaving controller that writes megabytes
     /// without a newline can't grow the buffer until OOM. 1 MiB is generous
     /// for any conceivable JSON command and small enough to bound damage.
-    private static let maxCarryBytes: Int = 1 << 20
+    static let maxCarryBytes: Int = 1 << 20
 
     private func pollOnce() async {
         let fm = FileManager.default
@@ -91,12 +101,14 @@ public final class TestCommandRunner {
         if size < byteOffset {
             CCLog.emitRecord([
                 "kind": "harness_warning",
+                "reason": "truncation_reset",
                 "msg": "command file truncated externally; resetting offset",
                 "previousOffset": byteOffset,
                 "newSize": size,
             ])
             byteOffset = 0
-            carry = ""
+            carry = Data()
+            skipToNextNewline = false
         }
         if size <= byteOffset { return }
         guard let fh = FileHandle(forReadingAtPath: path) else { return }
@@ -111,24 +123,29 @@ public final class TestCommandRunner {
         // may have grown again between stat and read, and we want the next
         // poll to pick those new bytes up rather than skipping them.
         byteOffset += data.count
-        guard let chunk = String(data: data, encoding: .utf8) else { return }
-        var combined = carry + chunk
-        if combined.utf8.count > Self.maxCarryBytes {
-            CCLog.emitRecord([
-                "kind": "harness_warning",
-                "msg": "command line exceeded \(Self.maxCarryBytes) bytes without a newline; dropping carry",
-            ])
-            combined = ""
-            carry = ""
-            return
+
+        let result = splitLines(
+            carry: carry,
+            chunk: data,
+            skipping: skipToNextNewline,
+            maxCarry: Self.maxCarryBytes
+        )
+        carry = result.newCarry
+        skipToNextNewline = result.skipToNextNewline
+        if let warning = result.warning {
+            CCLog.emitRecord(warning)
         }
-        var lines = combined.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
-        // The last element is whatever follows the final newline -- if it's
-        // empty, the chunk ended on a complete line; otherwise carry the
-        // partial line until the next poll completes it.
-        carry = lines.removeLast()
-        for raw in lines {
-            let trimmed = raw.trimmingCharacters(in: .whitespaces)
+        for lineData in result.lines {
+            guard let line = String(data: lineData, encoding: .utf8) else {
+                CCLog.emitRecord([
+                    "kind": "harness_warning",
+                    "reason": "invalid_utf8",
+                    "msg": "command line was not valid UTF-8; skipping",
+                    "bytes": lineData.count,
+                ])
+                continue
+            }
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
             if trimmed.isEmpty { continue }
             await dispatch(line: trimmed)
         }
@@ -300,4 +317,91 @@ public final class TestCommandRunner {
         if let n = args[key] as? NSNumber { return n.doubleValue }
         return nil
     }
+}
+
+/// Result of one round of carry+chunk splitting. Pure value type so the
+/// chunk-boundary logic can be unit-tested without a file or an actor.
+struct SplitLinesResult: Equatable {
+    var lines: [Data]
+    var newCarry: Data
+    var skipToNextNewline: Bool
+    var warning: [String: AnyHashable]?
+}
+
+/// Append `chunk` to `carry`, split off any complete `\n`-terminated lines,
+/// and return them along with the new carry. Operates on raw bytes so a
+/// multi-byte UTF-8 codepoint split across two reads survives the chunk
+/// boundary -- splitting on the newline byte (0x0a) is safe because every
+/// continuation byte of a multibyte UTF-8 sequence has the high bit set
+/// (>= 0x80), so 0x0a never appears mid-codepoint.
+///
+/// `skipping` is the carry-overflow recovery flag: when true, every byte
+/// up to and including the next newline is discarded. Without this, the
+/// *tail* of an oversized line would parse as if it were a fresh command
+/// and surface a misleading "command line is not a JSON object" error.
+///
+/// `maxCarry` caps the partial-line carry to bound memory growth from a
+/// misbehaving writer. When the carry exceeds the cap it's dropped and
+/// `skipToNextNewline` is returned set to `true`.
+func splitLines(
+    carry: Data,
+    chunk: Data,
+    skipping: Bool,
+    maxCarry: Int
+) -> SplitLinesResult {
+    let newline: UInt8 = 0x0a
+
+    // Recovery path: discard bytes until we see a newline, then resume.
+    var input = chunk
+    var skip = skipping
+    if skip {
+        if let nlOffset = input.firstIndex(of: newline) {
+            // Drop everything up to and including that newline; what
+            // follows is the next line and should be processed normally.
+            input = input.subdata(in: input.index(after: nlOffset)..<input.endIndex)
+            skip = false
+        } else {
+            // Whole chunk was tail of the oversized line. Stay in
+            // skip mode for the next poll.
+            return SplitLinesResult(
+                lines: [],
+                newCarry: Data(),
+                skipToNextNewline: true,
+                warning: nil
+            )
+        }
+    }
+
+    var combined = carry
+    combined.append(input)
+    var lines: [Data] = []
+    var lineStart = combined.startIndex
+    var i = combined.startIndex
+    while i < combined.endIndex {
+        if combined[i] == newline {
+            lines.append(combined.subdata(in: lineStart..<i))
+            lineStart = combined.index(after: i)
+        }
+        i = combined.index(after: i)
+    }
+    let newCarry = combined.subdata(in: lineStart..<combined.endIndex)
+    if newCarry.count > maxCarry {
+        return SplitLinesResult(
+            lines: lines,
+            newCarry: Data(),
+            skipToNextNewline: true,
+            warning: [
+                "kind": "harness_warning",
+                "reason": "carry_overflow",
+                "msg": "command line exceeded \(maxCarry) bytes without a newline; dropping partial carry",
+                "droppedBytes": newCarry.count,
+            ]
+        )
+    }
+    return SplitLinesResult(
+        lines: lines,
+        newCarry: newCarry,
+        skipToNextNewline: skip,
+        warning: nil
+    )
 }

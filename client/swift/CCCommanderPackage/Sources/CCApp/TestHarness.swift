@@ -121,7 +121,7 @@ public final class TestHarness {
     public func snapshot() -> [String: Any] {
         var dict: [String: Any] = [:]
         dict["isAuthenticated"] = appState.isAuthenticated
-        dict["connectionState"] = String(describing: appState.connection.state)
+        dict["connectionState"] = appState.connection.state.wireName
         dict["hasStoredCredentials"] = appState.connection.hasStoredCredentials
 
         dict["machines"] = appState.machines.map { m -> [String: Any] in

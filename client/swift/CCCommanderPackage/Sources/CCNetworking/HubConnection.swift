@@ -11,6 +11,17 @@ public enum HubConnectionState: Sendable, Equatable {
     case disconnected
     case connecting
     case connected
+
+    /// Stable wire-format string for logs and the test harness snapshot.
+    /// Defined here (not at the call site) so a future enum case rename
+    /// is a single-file change and the compiler enforces exhaustiveness.
+    public var wireName: String {
+        switch self {
+        case .disconnected: return "disconnected"
+        case .connecting: return "connecting"
+        case .connected: return "connected"
+        }
+    }
 }
 
 /// Manages the authenticated WebSocket connection to the hub.

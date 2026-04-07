@@ -71,6 +71,24 @@ sequence is:
 | `snapshot`              | --                                                   | full app state dictionary                     |
 | `quit`                  | --                                                   | `{stopped}` (runner exits)                    |
 
+### Validation
+
+- `id` and `cmd` are both required and must be non-empty strings. A line with either missing returns `{"ok": false, "error": "missing or empty 'id'"}` (or `'cmd'`) immediately, without dispatching.
+- A line that isn't a JSON object returns `{"ok": false, "error": "command line is not a JSON object", "raw": "..."}`.
+- `args.timeout` accepts both JSON `Int` (e.g. `10`) and JSON `Double` (e.g. `10.5`); both round-trip via the `optionalDouble` helper.
+
+### Diagnostic records
+
+In addition to `harness_response`, the runner emits these to `LOG_FILE`:
+
+| `kind`              | when                                                                                                |
+|---------------------|-----------------------------------------------------------------------------------------------------|
+| `harness_ready`     | After the command file is truncated on startup. Wait for this before writing commands.              |
+| `harness_stopped`   | After a `quit` command, just before `runUntilQuit` returns.                                         |
+| `harness_warning`   | External truncation reset (`previousOffset`/`newSize`), partial-line carry overflow (>1 MiB), or invalid UTF-8 in a line. |
+| `harness_action`    | Each high-level harness method (login, startSession, …) logs its action arguments before executing. |
+| `harness_result`    | Mirror of `harness_action` written when the action returns successfully.                            |
+
 `snapshot` returns:
 
 ```json
