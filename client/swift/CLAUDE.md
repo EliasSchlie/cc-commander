@@ -28,21 +28,25 @@ cd client/swift/CCCommanderPackage && swift test
 # Build the headless driver
 cd client/swift/CCCommanderPackage && swift build --product ccc-shadow
 
-# Build the macOS app (local dev)
-cd client/swift && xcodebuild build \
-  -project CCCommander.xcodeproj \
-  -scheme CCCommander_macOS \
-  -destination 'platform=macOS' \
-  -quiet
+# Build the macOS app (local dev) -- use the wrapper, not raw xcodebuild
+cd client/swift && ./scripts/build-app.sh
+# Prints the .app path on stdout. To launch:
+open "$(./scripts/build-app.sh)"
 ```
 
-**Do NOT pass `DEVELOPMENT_TEAM=` or `CODE_SIGN_IDENTITY=-` for local builds.**
-Both project.yml and the generated xcodeproj set the team to a stable
-Apple Developer ID. Overriding either flag forces ad-hoc signing, which
-changes the binary's code signature on every rebuild and makes the
-macOS Keychain pop "allow / deny" on every launch (the JWT's ACL is
-pinned to the previous binary's signature). CI is the only place that
-overrides these flags, because the GitHub runner has no Apple cert.
+`scripts/build-app.sh` is the *only* sanctioned local build path. It:
+- runs xcodebuild with no signing override flags
+- finds the freshly-built `.app` under DerivedData (handles per-worktree path hashes)
+- verifies `codesign` reports `TeamIdentifier=Q2U8K9N3BL` and bails loud if not
+- prints the .app path on stdout for piping into `open`
+
+**Do NOT pass `DEVELOPMENT_TEAM=` or `CODE_SIGN_IDENTITY=-` to xcodebuild
+for local builds.** Both project.yml and the generated xcodeproj set the
+team to a stable Apple Developer ID. Overriding either flag forces ad-hoc
+signing, which changes the binary's code signature on every rebuild and
+makes the macOS Keychain pop "allow / deny" on every launch (the JWT's
+ACL is pinned to the previous binary's signature). CI is the only place
+that overrides these flags, because the GitHub runner has no Apple cert.
 
 iOS is **not** built in CI -- macos-15 ships the iOS 18 SDK but no
 simulator runtime, and downloading one is slow + flaky. Cross-platform

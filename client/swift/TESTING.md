@@ -143,26 +143,14 @@ rendering on top of the same state mutations, so layout / binding bugs
 get exercised too.
 
 ```bash
-# 1. Build it (no signing flags -- the project sets a stable team ID
-#    so the macOS Keychain ACL on your stored JWT keeps matching).
+# 1. Build it. The wrapper builds, verifies the signature, and
+#    prints the .app path. Never pass signing flags by hand --
+#    see CLAUDE.md for why.
 cd client/swift
-xcodebuild build \
-  -project CCCommander.xcodeproj \
-  -scheme CCCommander_macOS \
-  -destination 'platform=macOS' \
-  -quiet
-
-# 2. Locate the built binary. Xcode puts it under DerivedData with
-#    a hash that depends on the project file path -- this command
-#    finds the most recent one.
-APP=$(find ~/Library/Developer/Xcode/DerivedData \
-        -path '*CCCommander*/Build/Products/Debug/CCCommander.app' \
-        -maxdepth 6 2>/dev/null \
-        | xargs -I {} stat -f '%m {}' {} \
-        | sort -rn | head -1 | cut -d' ' -f2-)
+APP=$(./scripts/build-app.sh)
 echo "Using $APP"
 
-# 3. Launch with the harness env vars. Run the executable directly --
+# 2. Launch with the harness env vars. Run the executable directly --
 #    `open` doesn't propagate env vars cleanly.
 LOG_FILE=/tmp/ccc-gui.log \
 CC_COMMANDER_CMD_FILE=/tmp/ccc-gui.cmd \
