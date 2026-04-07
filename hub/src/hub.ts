@@ -51,6 +51,7 @@ export interface HubConfig {
   rateLimits?: {
     login?: { capacity: number; perMinute: number };
     register?: { capacity: number; perMinute: number };
+    refresh?: { capacity: number; perMinute: number };
     machineCreate?: { capacity: number; perHour: number };
   };
 }
@@ -72,6 +73,7 @@ export class Hub {
   wss: WebSocketServer;
   loginLimiter: TokenBucketRateLimiter;
   registerLimiter: TokenBucketRateLimiter;
+  refreshLimiter: TokenBucketRateLimiter;
   machineCreateLimiter: TokenBucketRateLimiter;
 
   constructor(config: HubConfig) {
@@ -81,9 +83,18 @@ export class Hub {
     this.pendingHistoryRequests = new Map();
 
     const login = config.rateLimits?.login ?? { capacity: 5, perMinute: 5 };
+    // Capacity 3 (not 1) so that legitimate users behind shared NAT
+    // (corporate, mobile carriers, universities) and users who fat-
+    // finger their email/password on first try aren't immediately
+    // locked out. Refill is still strict (1/min) so a sustained
+    // signup-flood from one IP is bounded.
     const register = config.rateLimits?.register ?? {
-      capacity: 1,
+      capacity: 3,
       perMinute: 1,
+    };
+    const refresh = config.rateLimits?.refresh ?? {
+      capacity: 30,
+      perMinute: 30,
     };
     const machine = config.rateLimits?.machineCreate ?? {
       capacity: 10,
@@ -96,6 +107,10 @@ export class Hub {
     this.registerLimiter = new TokenBucketRateLimiter({
       capacity: register.capacity,
       refillPerMs: register.perMinute / 60_000,
+    });
+    this.refreshLimiter = new TokenBucketRateLimiter({
+      capacity: refresh.capacity,
+      refillPerMs: refresh.perMinute / 60_000,
     });
     this.machineCreateLimiter = new TokenBucketRateLimiter({
       capacity: machine.capacity,
@@ -110,6 +125,7 @@ export class Hub {
   start(): Promise<void> {
     this.loginLimiter.startSweeping();
     this.registerLimiter.startSweeping();
+    this.refreshLimiter.startSweeping();
     this.machineCreateLimiter.startSweeping();
     return new Promise((resolve) => {
       this.httpServer.listen(this.config.port, () => resolve());
@@ -120,6 +136,7 @@ export class Hub {
     return new Promise((resolve, reject) => {
       this.loginLimiter.stop();
       this.registerLimiter.stop();
+      this.refreshLimiter.stop();
       this.machineCreateLimiter.stop();
       for (const [, conn] of this.clients) conn.ws.close();
       for (const [, conn] of this.runners) conn.ws.close();
@@ -209,6 +226,11 @@ export class Hub {
     req: IncomingMessage,
     res: ServerResponse,
   ): Promise<void> {
+    if (!this.refreshLimiter.tryConsume(clientIp(req))) {
+      res.writeHead(429);
+      res.end(JSON.stringify({ error: "Too many requests" }));
+      return;
+    }
     try {
       const body = await readBody(req);
       if (!body.refreshToken) {

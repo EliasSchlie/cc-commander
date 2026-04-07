@@ -85,6 +85,7 @@ async function postJson(
 const TEST_RATE_LIMITS = {
   login: { capacity: 1000, perMinute: 1000 },
   register: { capacity: 1000, perMinute: 1000 },
+  refresh: { capacity: 1000, perMinute: 1000 },
   machineCreate: { capacity: 1000, perHour: 1000 },
 };
 
@@ -718,6 +719,38 @@ describe("rate limiting", () => {
     });
     assert.equal(r1.status, 200);
     assert.equal(r2.status, 429);
+  });
+
+  // Prevents: refresh-token brute force / abuse
+  it("returns 429 when refresh attempts exceed capacity", async () => {
+    await hub.stop();
+    db.close();
+    db = new HubDb(":memory:");
+    auth = new AuthService(db, JWT_SECRET);
+    hub = new Hub({
+      port: 0,
+      db,
+      auth,
+      rateLimits: {
+        login: { capacity: 100, perMinute: 100 },
+        register: { capacity: 100, perMinute: 100 },
+        refresh: { capacity: 2, perMinute: 0.0001 },
+        machineCreate: { capacity: 100, perHour: 100 },
+      },
+    });
+    await hub.start();
+    const addr = hub.httpServer.address();
+    port = typeof addr === "object" && addr ? addr.port : 0;
+    baseUrl = `http://localhost:${port}`;
+
+    const r1 = await postJson("/api/auth/refresh", { refreshToken: "x" });
+    const r2 = await postJson("/api/auth/refresh", { refreshToken: "x" });
+    const r3 = await postJson("/api/auth/refresh", { refreshToken: "x" });
+    // r1 and r2 will return 401 (bogus token) but consume the bucket;
+    // r3 must hit the limiter before reaching the auth check.
+    assert.equal(r1.status, 401);
+    assert.equal(r2.status, 401);
+    assert.equal(r3.status, 429);
   });
 
   // Prevents: an authenticated user spamming machine rows + tokens
