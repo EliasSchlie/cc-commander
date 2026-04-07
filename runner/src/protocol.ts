@@ -55,12 +55,14 @@ export interface StreamTextMsg {
 export interface ToolCallMsg {
   type: "tool_call";
   sessionId: string;
+  toolCallId: string;
   toolName: string;
   display: string;
 }
 export interface ToolResultMsg {
   type: "tool_result";
   sessionId: string;
+  toolCallId: string;
   content: string;
 }
 

@@ -59,7 +59,9 @@ export class MachineRunner {
 
       this.ws.on("open", () => {
         connected = true;
-        console.log(`[runner] Connected to hub as "${this.config.machineName}"`);
+        console.log(
+          `[runner] Connected to hub as "${this.config.machineName}"`,
+        );
         this.sendToHub({
           type: "runner_hello",
           machineName: this.config.machineName,
@@ -332,6 +334,7 @@ export class MachineRunner {
               this.sendToHub({
                 type: "tool_call",
                 sessionId,
+                toolCallId: bl.id,
                 toolName: bl.name,
                 display: formatToolDisplay(bl.name, bl.input),
               });
@@ -350,6 +353,7 @@ export class MachineRunner {
                 this.sendToHub({
                   type: "tool_result",
                   sessionId,
+                  toolCallId: bl.tool_use_id,
                   content: text.slice(0, 2000),
                 });
             }

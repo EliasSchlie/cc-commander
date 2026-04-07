@@ -67,14 +67,20 @@ struct AppStateTests {
         let state = makeAppState()
         state.handleMessage(.streamText(sessionId: "s1", content: "Hello"))
         state.handleMessage(.streamText(sessionId: "s1", content: " world"))
-        #expect(state.sessionStreams["s1"]?.pendingText == "Hello world")
+        let entries = state.sessionStreams["s1"]?.entries ?? []
+        #expect(entries.count == 1)
+        if case .assistantText(_, let text) = entries.first {
+            #expect(text == "Hello world")
+        } else {
+            Issue.record("Expected assistantText")
+        }
         #expect(state.sessionStreams["s2"] == nil)
     }
 
     // Prevents: tool call not dispatched
     @Test func toolCallDispatchesToSession() {
         let state = makeAppState()
-        state.handleMessage(.toolCall(sessionId: "s1", toolName: "Read", display: "Reading file"))
+        state.handleMessage(.toolCall(sessionId: "s1", toolCallId: "tc1", toolName: "Read", display: "Reading file"))
         let stream = state.sessionStreams["s1"]
         #expect(stream?.entries.count == 1)
     }
@@ -131,10 +137,15 @@ struct AppStateTests {
         state.handleMessage(.streamText(sessionId: "s1", content: "a"))
         state.handleMessage(.streamText(sessionId: "s1", content: "b"))
         #expect(state.sessionStreams.count == 1) // only one stream created
-        #expect(state.sessionStreams["s1"]?.pendingText == "ab")
+        let entries = state.sessionStreams["s1"]?.entries ?? []
+        if case .assistantText(_, let text) = entries.first {
+            #expect(text == "ab")
+        } else {
+            Issue.record("Expected coalesced assistantText")
+        }
     }
 
-    // Prevents: turn end doesn't flush pending text in stream
+    // Prevents: turn end doesn't advance turn boundary in stream
     @Test func statusChangeFromRunningTriggersFlushTurn() {
         let state = makeAppState()
         state.handleMessage(.sessionList(makeSessions()))
@@ -142,17 +153,13 @@ struct AppStateTests {
         let stream = SessionStream(sessionId: "s1")
         stream.status = .running
         stream.appendText("Some output")
-        stream.addToolCall(toolName: "Bash", display: "Running tests")
+        stream.addToolCall(toolCallId: "tc1", toolName: "Bash", display: "Running tests")
         state.sessionStreams["s1"] = stream
+        let entryCountBefore = stream.entries.count
 
         state.handleMessage(.sessionStatus(sessionId: "s1", status: .idle, lastMessagePreview: nil))
 
-        // Text should be flushed and tool calls collapsed
-        #expect(stream.pendingText.isEmpty)
-        for entry in stream.entries {
-            if case .toolCall(_, _, _, _, let collapsed) = entry {
-                #expect(collapsed == true)
-            }
-        }
+        // Turn boundary advanced -- past tool calls now render collapsed
+        #expect(stream.currentTurnStartIndex == entryCountBefore)
     }
 }

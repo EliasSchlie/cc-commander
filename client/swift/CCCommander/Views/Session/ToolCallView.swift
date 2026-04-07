@@ -4,16 +4,16 @@ struct ToolCallView: View {
     let toolName: String
     let display: String
     let result: String?
-    let collapsed: Bool
+    let isCurrentTurn: Bool
 
     @State private var isExpanded: Bool
 
-    init(toolName: String, display: String, result: String?, collapsed: Bool) {
+    init(toolName: String, display: String, result: String?, isCurrentTurn: Bool) {
         self.toolName = toolName
         self.display = display
         self.result = result
-        self.collapsed = collapsed
-        self._isExpanded = State(initialValue: !collapsed)
+        self.isCurrentTurn = isCurrentTurn
+        self._isExpanded = State(initialValue: isCurrentTurn)
     }
 
     var body: some View {
@@ -59,9 +59,6 @@ struct ToolCallView: View {
         }
         .background(Color(white: 0.5, opacity: 0.05), in: RoundedRectangle(cornerRadius: 8))
         .padding(.horizontal, 8)
-        .onChange(of: collapsed) { _, newValue in
-            if newValue { isExpanded = false }
-        }
     }
 
     private var toolIcon: String {

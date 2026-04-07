@@ -23,18 +23,12 @@ struct SessionDetailView: View {
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 12) {
-                        ForEach(stream.entries) { entry in
-                            SessionEntryView(entry: entry)
-                                .id(entry.id)
-                        }
-
-                        // Live streaming text
-                        if !stream.pendingText.isEmpty {
-                            Text(stream.pendingText)
-                                .font(.body)
-                                .textSelection(.enabled)
-                                .padding(.horizontal)
-                                .id("pending-text")
+                        ForEach(Array(stream.entries.enumerated()), id: \.element.id) { index, entry in
+                            SessionEntryView(
+                                entry: entry,
+                                isCurrentTurn: index >= stream.currentTurnStartIndex
+                            )
+                            .id(entry.id)
                         }
 
                         // Pending user prompt
@@ -50,10 +44,8 @@ struct SessionDetailView: View {
                         proxy.scrollTo(stream.entries.last?.id, anchor: .bottom)
                     }
                 }
-                .onChange(of: stream.pendingText) {
-                    if !stream.pendingText.isEmpty {
-                        proxy.scrollTo("pending-text", anchor: .bottom)
-                    }
+                .onChange(of: stream.streamRevision) {
+                    proxy.scrollTo(stream.entries.last?.id, anchor: .bottom)
                 }
             }
 

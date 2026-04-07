@@ -49,11 +49,11 @@ enum PreviewData {
     static let sampleEntries: [SessionEntry] = [
         .userMessage(id: "e1", text: "Implement the Swift client app for CC Commander"),
         .assistantText(id: "e2", text: "I'll start by reading the project specs and design documents to understand the architecture."),
-        .toolCall(id: "e3", toolName: "Read", display: "Reading SPEC.md", result: "# CC Commander\n> Control Claude Code sessions...", collapsed: true),
-        .toolCall(id: "e4", toolName: "Read", display: "Reading DESIGN.md", result: "# Technical Design\n...", collapsed: true),
+        .toolCall(id: "e3", toolCallId: "tc_e3", toolName: "Read", display: "Reading SPEC.md", result: "# CC Commander\n> Control Claude Code sessions..."),
+        .toolCall(id: "e4", toolCallId: "tc_e4", toolName: "Read", display: "Reading DESIGN.md", result: "# Technical Design\n..."),
         .assistantText(id: "e5", text: "Based on the specs, I'll create a SwiftUI app with three layers: CCModels for protocol types, CCNetworking for WebSocket communication, and the main app target."),
-        .toolCall(id: "e6", toolName: "Write", display: "Creating Package.swift", result: nil, collapsed: false),
-        .toolCall(id: "e7", toolName: "Bash", display: "Running swift test", result: "Test run with 22 tests passed", collapsed: false),
+        .toolCall(id: "e6", toolCallId: "tc_e6", toolName: "Write", display: "Creating Package.swift", result: nil),
+        .toolCall(id: "e7", toolCallId: "tc_e7", toolName: "Bash", display: "Running swift test", result: "Test run with 22 tests passed"),
     ]
 
     @MainActor static func makePreviewAppState() -> AppState {
