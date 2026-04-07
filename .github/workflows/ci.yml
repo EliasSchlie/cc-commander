@@ -56,9 +56,12 @@ jobs:
             -quiet
 
       - name: Build iOS app
+        # Use generic iOS device target so we don't need a simulator runtime
+        # installed on the runner (saves ~1GB download).
         run: |
           xcodebuild build \
             -project CCCommander.xcodeproj \
             -scheme CCCommander_iOS \
-            -destination 'generic/platform=iOS Simulator' \
+            -destination 'generic/platform=iOS' \
+            CODE_SIGNING_ALLOWED=NO \
             -quiet
