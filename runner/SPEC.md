@@ -26,3 +26,30 @@ A machine can have multiple independent runner installs for different accounts. 
 ## Adding a machine
 
 The app gives you a command to run on the machine. The runner registers with the hub and appears in the app.
+
+## Working directory validation
+
+Every `start_session` carries a `directory`. Before invoking the SDK,
+the runner validates that the path is:
+
+- absolute (relative paths would silently resolve against the runner
+  process cwd, which is rarely what the user intended)
+- present on disk
+- a directory (not a regular file)
+
+A failed check is reported back to the client as a `session_error` with
+a clear message (`Working directory does not exist: …` etc.) **before**
+any `session_status: running` is broadcast, so a bad cwd doesn't flap
+the session through running → error in the hub DB or client UI. Without
+this check the SDK's own `chdir` failure surfaces as the misleading
+"Claude Code executable not found at .../cli.js".
+
+## Self-update
+
+The runner polls `GET /api/version` on the hub every 5 minutes. When
+the hub's `VERSION` (git SHA on `main` builds, tag name on `v*` builds)
+no longer matches the runner's checked-out commit, the runner runs
+`runner/scripts/update.sh` synchronously (`git fetch`, `git checkout`,
+`npm ci`), exits cleanly, and launchd restarts it against the new code.
+Logs land in `~/Library/Logs/cc-commander-runner-update.log`. See
+[`DEPLOY.md`](../DEPLOY.md) for the operator-facing view.

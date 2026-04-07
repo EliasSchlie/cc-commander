@@ -93,9 +93,11 @@ The hub bakes a `VERSION` (full git SHA) into the image and serves it
 from `GET /api/version`. Each runner polls that endpoint every 5 minutes
 (configurable via `CC_COMMANDER_POLL_MS`). When the runner's own
 checked-out commit no longer matches the hub's `VERSION`, the runner
-runs `runner/scripts/update.sh` synchronously (`git fetch && git
+runs `runner/scripts/update.sh` **synchronously** (`git fetch && git
 checkout origin/main && npm ci`), then exits and launchd restarts it
-against the new code. Logs land in
+against the new code. Synchronous execution is load-bearing: the
+previous detached approach raced launchd's restart and could leave a
+half-updated checkout (PR #67). Logs land in
 `~/Library/Logs/cc-commander-runner-update.log`.
 
 So the deploy story is: **push to main → CI builds and SSH-deploys the
