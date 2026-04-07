@@ -4,19 +4,15 @@ struct ToolCallView: View {
     let toolName: String
     let display: String
     let result: String?
-    let isCurrentTurn: Bool
 
-    /// `nil` means follow `isCurrentTurn` (auto-collapse when the turn ends).
-    /// Set to a concrete value once the user toggles, sticking to their choice.
-    @State private var userToggled: Bool? = nil
-
-    private var isExpanded: Bool { userToggled ?? isCurrentTurn }
+    // User toggles stick; never auto-collapse on turn boundary.
+    @State private var isExpanded: Bool = true
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             Button {
                 withAnimation(.easeInOut(duration: 0.2)) {
-                    userToggled = !isExpanded
+                    isExpanded.toggle()
                 }
             } label: {
                 HStack(spacing: 6) {
@@ -31,6 +27,7 @@ struct ToolCallView: View {
                         .font(.callout)
                         .foregroundStyle(.primary)
                         .lineLimit(1)
+                        .truncationMode(.middle)
                     Spacer()
                     Text(toolName)
                         .font(.caption2)
@@ -42,12 +39,14 @@ struct ToolCallView: View {
             }
             .buttonStyle(.plain)
 
-            if isExpanded, let result {
+            // `result` may be an empty string when a tool produced no output;
+            // skip the padded box in that case.
+            if isExpanded, let result, !result.isEmpty {
                 Text(result)
                     .font(.system(.caption, design: .monospaced))
                     .foregroundStyle(.secondary)
                     .textSelection(.enabled)
-                    .lineLimit(20)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.horizontal)
                     .padding(.leading, 18)
                     .padding(.bottom, 6)
