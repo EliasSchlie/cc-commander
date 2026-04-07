@@ -155,8 +155,8 @@ public final class HubConnection {
         try await send(.getSessionHistory(sessionId: sessionId))
     }
 
-    public func deleteSession(sessionId: String) async throws {
-        try await send(.deleteSession(sessionId: sessionId))
+    public func archiveSession(sessionId: String) async throws {
+        try await send(.archiveSession(sessionId: sessionId))
     }
 
     // MARK: - Message stream

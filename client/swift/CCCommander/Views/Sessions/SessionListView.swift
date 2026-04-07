@@ -21,13 +21,13 @@ struct SessionListView: View {
             #if os(macOS)
             SessionRowView(session: session, machineName: machineName(for: session))
                 .tag(session.sessionId)
-                .contextMenu { deleteButton(for: session) }
+                .contextMenu { archiveButton(for: session) }
             #else
             NavigationLink(value: session.sessionId) {
                 SessionRowView(session: session, machineName: machineName(for: session))
             }
             .swipeActions(edge: .trailing, allowsFullSwipe: true) {
-                deleteButton(for: session)
+                archiveButton(for: session)
             }
             #endif
         }
@@ -84,18 +84,18 @@ struct SessionListView: View {
     }
 
     @ViewBuilder
-    private func deleteButton(for session: SessionMeta) -> some View {
-        Button("Delete", systemImage: "trash", role: .destructive) {
-            delete(session)
+    private func archiveButton(for session: SessionMeta) -> some View {
+        Button("Archive", systemImage: "archivebox", role: .destructive) {
+            archive(session)
         }
     }
 
-    private func delete(_ session: SessionMeta) {
+    private func archive(_ session: SessionMeta) {
         Task {
             do {
-                try await appState.deleteSession(sessionId: session.sessionId)
+                try await appState.archiveSession(sessionId: session.sessionId)
             } catch {
-                appState.recordError("Failed to delete session: \(error.localizedDescription)")
+                appState.recordError("Failed to archive session: \(error.localizedDescription)")
             }
         }
     }

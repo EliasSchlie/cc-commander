@@ -110,8 +110,8 @@ public final class AppState {
         try await connection.requestSessionHistory(sessionId: sessionId)
     }
 
-    public func deleteSession(sessionId: String) async throws {
-        try await connection.deleteSession(sessionId: sessionId)
+    public func archiveSession(sessionId: String) async throws {
+        try await connection.archiveSession(sessionId: sessionId)
     }
 
     public func recordError(_ message: String) {

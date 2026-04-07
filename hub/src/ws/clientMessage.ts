@@ -56,8 +56,8 @@ export function handleClientMessage(
     case "get_session_history":
       handleGetSessionHistory(ctx, conn, msg);
       break;
-    case "delete_session":
-      handleDeleteSession(ctx, conn, msg);
+    case "archive_session":
+      handleArchiveSession(ctx, conn, msg);
       break;
   }
 }
@@ -189,20 +189,20 @@ function handleGetSessionHistory(
   });
 }
 
-function handleDeleteSession(
+function handleArchiveSession(
   ctx: WsContext,
   conn: ClientConnection,
   msg: { sessionId: string },
 ): void {
-  // Ownership check before delete so phantom/foreign ids get a clear
+  // Ownership check before archive so phantom/foreign ids get a clear
   // error rather than a silent no-op.
   const session = ctx.db.getSessionById(msg.sessionId);
   if (!session || session.accountId !== conn.accountId) {
     ctx.sendToClient(conn, { type: "error", message: "Session not found" });
     return;
   }
-  const removed = ctx.db.deleteSession(msg.sessionId, conn.accountId);
-  if (removed > 0) {
+  const affected = ctx.db.archiveSession(msg.sessionId, conn.accountId);
+  if (affected > 0) {
     ctx.broadcastSessionList(conn.accountId);
   }
 }

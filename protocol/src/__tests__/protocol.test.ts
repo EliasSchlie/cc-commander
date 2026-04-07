@@ -43,19 +43,19 @@ describe("parseClientMessage", () => {
     assert.equal(msg.type, "list_sessions");
   });
 
-  it("parses a valid delete_session message", () => {
+  it("parses a valid archive_session message", () => {
     const msg = parseClientMessage(
-      '{"type":"delete_session","sessionId":"s1"}',
+      '{"type":"archive_session","sessionId":"s1"}',
     );
-    assert.equal(msg.type, "delete_session");
-    if (msg.type === "delete_session") {
+    assert.equal(msg.type, "archive_session");
+    if (msg.type === "archive_session") {
       assert.equal(msg.sessionId, "s1");
     }
   });
 
-  it("rejects delete_session without sessionId", () => {
+  it("rejects archive_session without sessionId", () => {
     assert.throws(
-      () => parseClientMessage('{"type":"delete_session"}'),
+      () => parseClientMessage('{"type":"archive_session"}'),
       /Missing required field: sessionId/,
     );
   });

@@ -76,8 +76,8 @@ export interface GetSessionHistoryMsg {
   sessionId: string;
 }
 
-export interface DeleteSessionMsg {
-  type: "delete_session";
+export interface ArchiveSessionMsg {
+  type: "archive_session";
   sessionId: string;
 }
 
@@ -91,7 +91,7 @@ export type ClientToHubMsg =
   | RespondToPromptMsg
   | ListSessionsMsg
   | GetSessionHistoryMsg
-  | DeleteSessionMsg
+  | ArchiveSessionMsg
   | ListMachinesMsg;
 
 // ── Messages: Hub -> Runner ──────────────────────────────────────────────
@@ -298,7 +298,7 @@ const CLIENT_MSG_REQUIRED_FIELDS: Record<string, readonly string[]> = {
   respond_to_prompt: ["sessionId", "promptId", "response"],
   list_sessions: [],
   get_session_history: ["sessionId"],
-  delete_session: ["sessionId"],
+  archive_session: ["sessionId"],
   list_machines: [],
 };
 

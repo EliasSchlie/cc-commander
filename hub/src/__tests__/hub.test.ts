@@ -1450,9 +1450,9 @@ describe("session_history reply routing", () => {
   });
 });
 
-// ── delete_session ──────────────────────────────────────────────────────
-describe("delete_session", () => {
-  it("removes the session from the DB and broadcasts the new list", async () => {
+// ── archive_session ─────────────────────────────────────────────────────
+describe("archive_session", () => {
+  it("hides the session from listSessionsForAccount and broadcasts the new list, but keeps the row", async () => {
     const tokens = await auth.register("user@test.com", "pass");
     const account = db.getAccountByEmail("user@test.com")!;
     const machine = db.createMachine(account.id, "Test Machine");
@@ -1466,19 +1466,37 @@ describe("delete_session", () => {
       clientWs,
       (m) => m.type === "session_list" && m.sessions.length === 0,
     );
-    send(clientWs, { type: "delete_session", sessionId: session.id });
+    send(clientWs, { type: "archive_session", sessionId: session.id });
 
     const list = await listPromise;
     assert.equal(list.sessions.length, 0);
-    assert.equal(db.getSessionById(session.id), undefined);
+    // Row preserved for post-mortem.
+    assert.ok(db.getSessionById(session.id));
 
     await closeWs(clientWs);
     await closeWs(runnerWs);
   });
 
+  // Prevents: archived rows leaking back into the live sidebar via
+  // listSessionsForAccount when status updates touch them later
+  // (an idle archived session that received a stray runner reply
+  // shouldn't reappear).
+  it("keeps archived sessions out of listSessionsForAccount even after status changes", async () => {
+    const tokens = await auth.register("user@test.com", "pass");
+    const account = db.getAccountByEmail("user@test.com")!;
+    const machine = db.createMachine(account.id, "M");
+    const session = db.createSession(account.id, machine.id, "/tmp", "idle");
+    db.archiveSession(session.id, account.id);
+    db.updateSessionStatus(session.id, "running");
+    const visible = db.listSessionsForAccount(account.id);
+    assert.equal(visible.length, 0);
+    // Still in the table.
+    assert.ok(db.getSessionById(session.id));
+  });
+
   // Prevents: cross-account leakage where a bug in the WS layer would
-  // let one account delete another's sessions by guessing the id.
-  it("rejects deletion of a session owned by a different account", async () => {
+  // let one account archive another's sessions by guessing the id.
+  it("rejects archive of a session owned by a different account", async () => {
     const tokensA = await auth.register("a@test.com", "pass");
     const tokensB = await auth.register("b@test.com", "pass");
     const accountA = db.getAccountByEmail("a@test.com")!;
@@ -1489,12 +1507,14 @@ describe("delete_session", () => {
     await new Promise((r) => setTimeout(r, 100));
 
     const errPromise = waitForMsg(clientB, (m) => m.type === "error");
-    send(clientB, { type: "delete_session", sessionId: sessionA.id });
+    send(clientB, { type: "archive_session", sessionId: sessionA.id });
     const err = await errPromise;
     assert.match(err.message, /Session not found/);
 
-    // Session must still exist for its real owner.
-    assert.ok(db.getSessionById(sessionA.id));
+    // Session must still exist (and be unarchived) for its real owner.
+    const stillThere = db.getSessionById(sessionA.id);
+    assert.ok(stillThere);
+    assert.equal(db.listSessionsForAccount(accountA.id).length, 1);
 
     await closeWs(clientB);
     void tokensA;
@@ -1507,7 +1527,7 @@ describe("delete_session", () => {
 
     const errPromise = waitForMsg(clientWs, (m) => m.type === "error");
     send(clientWs, {
-      type: "delete_session",
+      type: "archive_session",
       sessionId: "00000000-0000-0000-0000-000000000000",
     });
     const err = await errPromise;
