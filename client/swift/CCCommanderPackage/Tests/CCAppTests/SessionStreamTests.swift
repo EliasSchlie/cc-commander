@@ -232,6 +232,47 @@ struct SessionStreamTests {
         }
     }
 
+    // Prevents: marathon sessions OOM the client because entries grows
+    // unbounded -- the hub does not store history, so this array is the
+    // only place a long session lives.
+    @Test func entriesAreCappedWithEviction() {
+        let stream = SessionStream(sessionId: "s1")
+        let cap = SessionStream.maxEntries
+        // Append cap+50 errors and verify only the newest cap survive,
+        // in the original order.
+        for i in 0..<(cap + 50) {
+            stream.addError("err\(i)")
+        }
+        #expect(stream.entries.count == cap)
+        if case .error(_, let firstMsg) = stream.entries.first {
+            #expect(firstMsg == "err50")
+        } else {
+            Issue.record("first entry should be err50 after eviction")
+        }
+        if case .error(_, let lastMsg) = stream.entries.last {
+            #expect(lastMsg == "err\(cap + 49)")
+        } else {
+            Issue.record("last entry should be err\(cap + 49)")
+        }
+    }
+
+    // Prevents: currentTurnStartIndex pointing past end-of-array after
+    // eviction, breaking the "current turn" rendering split.
+    @Test func evictionAdjustsCurrentTurnStartIndex() {
+        let stream = SessionStream(sessionId: "s1")
+        stream.addError("first")
+        stream.flushTurn()
+        let originalStart = stream.currentTurnStartIndex
+        #expect(originalStart == 1)
+        // Push enough entries to evict the first one.
+        for i in 0..<SessionStream.maxEntries {
+            stream.addError("e\(i)")
+        }
+        #expect(stream.entries.count == SessionStream.maxEntries)
+        // currentTurnStartIndex was 1, one entry was evicted -> now 0.
+        #expect(stream.currentTurnStartIndex == 0)
+    }
+
     // Prevents: isGenerating not accurate during running status
     @Test func isGeneratingReflectsStatus() {
         let stream = SessionStream(sessionId: "s1")
