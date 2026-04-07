@@ -42,6 +42,13 @@ targets:
         # the previously-stored JWT no longer matches, and macOS pops
         # "allow / deny" on every launch. CI overrides this back to
         # empty for the GitHub runner (no Apple cert available).
+        #
+        # Forks: replace Q2U8K9N3BL with your own team ID (visible in
+        # your Apple Developer account) and pass `CCC_EXPECTED_TEAM` to
+        # scripts/build-app.sh, or update the default in that script.
+        # The same team is currently used for both macOS and iOS configs;
+        # if you ever distribute the iOS app under a different team,
+        # scope this setting per-platform via `targets.CCCommander.platforms`.
         DEVELOPMENT_TEAM: Q2U8K9N3BL
         CODE_SIGN_STYLE: Automatic
       configs:
