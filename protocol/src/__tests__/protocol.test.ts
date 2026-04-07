@@ -43,6 +43,23 @@ describe("parseClientMessage", () => {
     assert.equal(msg.type, "list_sessions");
   });
 
+  it("parses a valid archive_session message", () => {
+    const msg = parseClientMessage(
+      '{"type":"archive_session","sessionId":"s1"}',
+    );
+    assert.equal(msg.type, "archive_session");
+    if (msg.type === "archive_session") {
+      assert.equal(msg.sessionId, "s1");
+    }
+  });
+
+  it("rejects archive_session without sessionId", () => {
+    assert.throws(
+      () => parseClientMessage('{"type":"archive_session"}'),
+      /Missing required field: sessionId/,
+    );
+  });
+
   // Symmetric with parseHubMessage's hub_respond_to_prompt check.
   it("rejects respond_to_prompt with non-object response", () => {
     assert.throws(

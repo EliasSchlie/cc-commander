@@ -155,6 +155,10 @@ public final class HubConnection {
         try await send(.getSessionHistory(sessionId: sessionId))
     }
 
+    public func archiveSession(sessionId: String) async throws {
+        try await send(.archiveSession(sessionId: sessionId))
+    }
+
     // MARK: - Message stream
 
     /// The single stream of incoming messages from the hub.

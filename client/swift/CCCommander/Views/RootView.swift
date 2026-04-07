@@ -5,10 +5,24 @@ struct RootView: View {
     @Environment(AppState.self) private var appState
 
     var body: some View {
-        if appState.isAuthenticated {
-            mainContent
-        } else {
-            AuthView()
+        Group {
+            if appState.isAuthenticated {
+                mainContent
+            } else {
+                AuthView()
+            }
+        }
+        .alert(
+            "Hub error",
+            isPresented: Binding(
+                get: { appState.lastError != nil },
+                set: { showing in if !showing { appState.lastError = nil } }
+            ),
+            presenting: appState.lastError
+        ) { _ in
+            Button("OK", role: .cancel) { appState.lastError = nil }
+        } message: { toast in
+            Text(toast.message)
         }
     }
 

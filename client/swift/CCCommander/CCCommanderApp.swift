@@ -82,7 +82,12 @@ struct CCCommanderApp: App {
                             if let prompt = ProcessInfo.processInfo.environment["CC_COMMANDER_TEST_PROMPT"],
                                !prompt.isEmpty,
                                let target = appState.onlineMachines.first {
-                                let dir = ProcessInfo.processInfo.environment["CC_COMMANDER_TEST_DIR"] ?? "/tmp"
+                                // Required: a default would silently leave session rows in the shared hub DB.
+                                guard let dir = ProcessInfo.processInfo.environment["CC_COMMANDER_TEST_DIR"], !dir.isEmpty else {
+                                    Self.testLog("CC_COMMANDER_TEST_DIR not set; refusing to start session in test mode")
+                                    log.error("CC_COMMANDER_TEST_DIR not set; refusing to start test session")
+                                    return
+                                }
                                 let knownIds = Set(appState.sessions.map(\.sessionId))
                                 Self.testLog("starting session on \(target.name) dir=\(dir)")
                                 do {

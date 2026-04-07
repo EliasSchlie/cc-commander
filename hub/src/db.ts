@@ -97,6 +97,7 @@ export class HubDb {
     // a no-op (duplicate column errors swallowed).
     this.addColumnIfMissing("sessions", "error_message", "TEXT");
     this.addColumnIfMissing("sessions", "ended_at", "TEXT");
+    this.addColumnIfMissing("sessions", "archived_at", "TEXT");
 
     // Index supporting post-mortem queries: "show me all errored
     // sessions on machine X in the last day". Without it the
@@ -253,9 +254,12 @@ export class HubDb {
   }
 
   listSessionsForAccount(accountId: string): SessionMeta[] {
+    // Archived rows stay in the table for post-mortem queries
+    // (listFailedSessionsForAccount, /api/debug/state) but must not
+    // appear in the user's sidebar.
     const rows = this.db
       .prepare(
-        "SELECT id, account_id, machine_id, directory, status, last_activity, last_message_preview, created_at FROM sessions WHERE account_id = ? ORDER BY last_activity DESC",
+        "SELECT id, account_id, machine_id, directory, status, last_activity, last_message_preview, created_at FROM sessions WHERE account_id = ? AND archived_at IS NULL ORDER BY last_activity DESC",
       )
       .all(accountId) as any[];
     return rows.map((r) => ({
@@ -327,6 +331,20 @@ export class HubDb {
     this.db
       .prepare("UPDATE sessions SET sdk_session_id = ? WHERE id = ?")
       .run(sdkSessionId, sessionId);
+  }
+
+  /** Soft-delete: stamps `archived_at` so the row stays available for
+   *  post-mortem queries (`listFailedSessionsForAccount`,
+   *  `/api/debug/state`) while disappearing from `listSessionsForAccount`.
+   *  Account-scoped so cross-account ids never match. Returns rows
+   *  affected (0 if not found / wrong account / already archived). */
+  archiveSession(sessionId: string, accountId: string): number {
+    const result = this.db
+      .prepare(
+        "UPDATE sessions SET archived_at = datetime('now') WHERE id = ? AND account_id = ? AND archived_at IS NULL",
+      )
+      .run(sessionId, accountId);
+    return result.changes;
   }
 
   /** Marks all non-idle sessions on a machine as errored. Returns the number affected. */

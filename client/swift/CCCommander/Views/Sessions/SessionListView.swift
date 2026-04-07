@@ -21,9 +21,13 @@ struct SessionListView: View {
             #if os(macOS)
             SessionRowView(session: session, machineName: machineName(for: session))
                 .tag(session.sessionId)
+                .contextMenu { archiveButton(for: session) }
             #else
             NavigationLink(value: session.sessionId) {
                 SessionRowView(session: session, machineName: machineName(for: session))
+            }
+            .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                archiveButton(for: session)
             }
             #endif
         }
@@ -77,5 +81,22 @@ struct SessionListView: View {
 
     private func machineName(for session: SessionMeta) -> String {
         appState.machines.first { $0.machineId == session.machineId }?.name ?? "Unknown"
+    }
+
+    @ViewBuilder
+    private func archiveButton(for session: SessionMeta) -> some View {
+        Button("Archive", systemImage: "archivebox", role: .destructive) {
+            archive(session)
+        }
+    }
+
+    private func archive(_ session: SessionMeta) {
+        Task {
+            do {
+                try await appState.archiveSession(sessionId: session.sessionId)
+            } catch {
+                appState.recordError("Failed to archive session: \(error.localizedDescription)")
+            }
+        }
     }
 }
