@@ -306,11 +306,20 @@ async function cmdRun(flags: Record<string, string | boolean>): Promise<void> {
 
       const script = join(RUNNER_REPO_DIR, "scripts", "update.sh");
       log.info("running update script (sync)", { script, hubVersion });
-      // Disconnect from the hub BEFORE the long-running update so
-      // the hub can mark active sessions as errored on this machine
-      // promptly instead of waiting for the WS to time out. Sessions
-      // will resume when launchd restarts the runner.
-      runner.disconnect();
+      // CRITICAL: do not call runner.disconnect() before spawnSync.
+      // disconnect() flips shouldReconnect=false permanently, so on
+      // an update failure (return path below) the runner would stay
+      // alive without a hub connection -- a zombie that launchd
+      // never restarts. Disconnect ONLY on the success path,
+      // immediately before process.exit, so any failure leaves the
+      // runner intact and connected on the OLD tree.
+      //
+      // Side effect: spawnSync blocks the event loop for the
+      // duration of the update (~2-5s typical, longer on cold npm
+      // ci), so the WS heartbeat doesn't run. If the heartbeat
+      // window trips, the hub will see the runner go away briefly
+      // and mark in-flight sessions as errored -- same end state as
+      // an explicit disconnect, no worse.
       const result = spawnSync("/bin/sh", [script, hubVersion], {
         cwd: RUNNER_REPO_DIR,
         // Inherit stdio so update.sh's npm ci output streams to the
@@ -322,9 +331,9 @@ async function cmdRun(flags: Record<string, string | boolean>): Promise<void> {
         log.error("failed to spawn update script", {
           err: result.error,
         });
-        // Don't exit -- the runner stays up on the OLD tree and the
+        // Runner stays up on OLD tree and OLD hub connection. The
         // failure marker (written by update.sh on its own failures)
-        // will block retries during the cooldown window.
+        // blocks retries during the cooldown window.
         return;
       }
       if (result.status !== 0) {
@@ -337,6 +346,7 @@ async function cmdRun(flags: Record<string, string | boolean>): Promise<void> {
       log.info("update script complete; exiting for launchd restart", {
         hubVersion,
       });
+      runner.disconnect();
       process.exit(0);
     },
   });
