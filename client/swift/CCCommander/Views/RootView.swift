@@ -5,10 +5,27 @@ struct RootView: View {
     @Environment(AppState.self) private var appState
 
     var body: some View {
-        if appState.isAuthenticated {
-            mainContent
-        } else {
-            AuthView()
+        Group {
+            if appState.isAuthenticated {
+                mainContent
+            } else {
+                AuthView()
+            }
+        }
+        // Surface hub-side errors to the user instead of dropping them on
+        // the floor. Driven by `AppState.lastError`; cleared when the
+        // user dismisses the alert.
+        .alert(
+            "Hub error",
+            isPresented: Binding(
+                get: { appState.lastError != nil },
+                set: { showing in if !showing { appState.lastError = nil } },
+            ),
+            presenting: appState.lastError,
+        ) { _ in
+            Button("OK", role: .cancel) { appState.lastError = nil }
+        } message: { toast in
+            Text(toast.message)
         }
     }
 

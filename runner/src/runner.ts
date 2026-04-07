@@ -1,3 +1,5 @@
+import { statSync } from "node:fs";
+import { isAbsolute } from "node:path";
 import { WebSocket } from "ws";
 import { query, getSessionMessages } from "@anthropic-ai/claude-agent-sdk";
 import { parseHubMessage, serialize } from "@cc-commander/protocol";
@@ -209,6 +211,30 @@ export class MachineRunner {
     console.log(
       `[runner] runSession start sid=${sessionId} cwd=${extra.cwd ?? "<none>"} resume=${extra.resume ?? "<none>"} promptLen=${prompt.length}`,
     );
+
+    // Validate cwd before invoking the SDK. Without this check the SDK
+    // chdirs into a missing/invalid directory and the resulting failure
+    // surfaces as a misleading "Claude Code executable not found at
+    // .../cli.js" error -- it's actually just a bad cwd, but the SDK
+    // blames the executable path. Catching it here gives the user a
+    // clear "directory does not exist" message.
+    if (extra.cwd !== undefined) {
+      const cwdError = validateCwd(extra.cwd);
+      if (cwdError) {
+        console.error(
+          `[runner] runSession sid=${sessionId} rejecting cwd "${extra.cwd}": ${cwdError}`,
+        );
+        this.sendToHub({
+          type: "session_error",
+          sessionId,
+          error: cwdError,
+        });
+        if (this.sessions.get(sessionId) === session) {
+          this.sessions.delete(sessionId);
+        }
+        return;
+      }
+    }
 
     let promptCounter = 0;
     let streamCount = 0;
@@ -544,6 +570,32 @@ export class MachineRunner {
       resolver(response);
     }
   }
+}
+
+/**
+ * Validate a working directory path before handing it to the SDK.
+ *
+ * Returns a human-readable error string on failure, or `null` on success.
+ * Failures we want to catch:
+ *   - relative paths (the SDK silently resolves these against the
+ *     runner's cwd, which is rarely what the user meant)
+ *   - missing paths
+ *   - paths that exist but aren't directories (e.g. a regular file)
+ */
+function validateCwd(cwd: string): string | null {
+  if (!isAbsolute(cwd)) {
+    return `Working directory must be an absolute path (got "${cwd}")`;
+  }
+  let stat;
+  try {
+    stat = statSync(cwd);
+  } catch {
+    return `Working directory does not exist: ${cwd}`;
+  }
+  if (!stat.isDirectory()) {
+    return `Working directory is not a directory: ${cwd}`;
+  }
+  return null;
 }
 
 function rejectPendingPrompts(session: ActiveSession, message: string): void {

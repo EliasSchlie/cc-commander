@@ -235,6 +235,20 @@ export class HubDb {
       .run(sdkSessionId, sessionId);
   }
 
+  /**
+   * Delete a session by id, scoped to its owning account so cross-account
+   * deletion is impossible regardless of bugs in the WS layer. Returns the
+   * number of rows actually removed (0 if not found / wrong account).
+   *
+   * No cascade: nothing else in the schema references `sessions.id`.
+   */
+  deleteSession(sessionId: string, accountId: string): number {
+    const result = this.db
+      .prepare("DELETE FROM sessions WHERE id = ? AND account_id = ?")
+      .run(sessionId, accountId);
+    return result.changes;
+  }
+
   /** Marks all non-idle sessions on a machine as errored. Returns the number affected. */
   markSessionsErrorForMachine(machineId: string, errorMessage: string): number {
     // Type anchor: rename a SessionStatus value and these will fail to compile.

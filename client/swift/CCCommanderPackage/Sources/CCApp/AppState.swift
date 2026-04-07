@@ -6,6 +6,19 @@ import CCNetworking
 
 private let log = Logger(subsystem: "com.cc-commander.app", category: "AppState")
 
+/// A transient error surfaced from the hub (or a local action) so the UI
+/// can show it to the user instead of swallowing it. Identifiable so the
+/// SwiftUI alert presentation can re-fire when a new error replaces an
+/// existing one with the same text.
+public struct HubErrorToast: Identifiable, Equatable, Sendable {
+    public let id: UUID
+    public let message: String
+    public init(message: String) {
+        self.id = UUID()
+        self.message = message
+    }
+}
+
 /// Canonical app state. Owns the hub connection and holds all sessions/machines.
 @MainActor
 @Observable
@@ -14,8 +27,25 @@ public final class AppState {
 
     public var sessions: [SessionMeta] = []
     public var machines: [MachineInfo] = []
-    public var selectedSessionId: String?
+    public var selectedSessionId: String? {
+        didSet {
+            // Eagerly create a stream and request history when a session is
+            // selected. Without this, the view stays stuck on a "Loading
+            // session..." spinner because the stream dictionary is only
+            // populated by inbound messages -- selecting an idle session
+            // (which has no live messages) would never trigger anything.
+            guard let id = selectedSessionId, oldValue != id else { return }
+            ensureStreamAndLoadHistory(sessionId: id)
+        }
+    }
     public var sessionStreams: [String: SessionStream] = [:]
+
+    /// Most recent hub error, surfaced to the UI as a toast/alert. Set to
+    /// `nil` after the user dismisses it. Previously these were `print()`d
+    /// and silently dropped, which made every hub-side validation failure
+    /// (offline machine, invalid directory, ...) look like "nothing
+    /// happened" to the user.
+    public var lastError: HubErrorToast?
 
     public var isAuthenticated: Bool {
         connection.state == .connected || connection.hasStoredCredentials
@@ -88,6 +118,28 @@ public final class AppState {
         try await connection.requestSessionHistory(sessionId: sessionId)
     }
 
+    public func deleteSession(sessionId: String) async throws {
+        try await connection.deleteSession(sessionId: sessionId)
+    }
+
+    /// Make sure a `SessionStream` exists for `sessionId` (so the detail
+    /// view has something to render immediately) and kick off a history
+    /// request. Safe to call multiple times -- it does nothing if the
+    /// stream already has entries.
+    private func ensureStreamAndLoadHistory(sessionId: String) {
+        let stream = streamFor(sessionId)
+        guard stream.entries.isEmpty else { return }
+        Task { [weak self] in
+            do {
+                try await self?.loadSessionHistory(sessionId: sessionId)
+            } catch {
+                self?.lastError = HubErrorToast(
+                    message: "Failed to load session history: \(error.localizedDescription)",
+                )
+            }
+        }
+    }
+
     // MARK: - Message dispatch
 
     public func handleMessage(_ message: ServerMessage) {
@@ -97,6 +149,12 @@ public final class AppState {
             // Evict streams for sessions no longer in the list
             let liveIds = Set(list.map(\.sessionId))
             sessionStreams = sessionStreams.filter { liveIds.contains($0.key) }
+            // Clear selection if the selected session was removed (e.g.
+            // deleted from another client). Avoids the detail view
+            // pointing at a phantom session.
+            if let selected = selectedSessionId, !liveIds.contains(selected) {
+                selectedSessionId = nil
+            }
 
         case .machineList(let list):
             log.info("machine_list received with \(list.count, privacy: .public) machine(s)")
@@ -140,7 +198,8 @@ public final class AppState {
             streamFor(sessionId).loadHistory(messages, error: error)
 
         case .error(let message):
-            print("Hub error: \(message)")
+            log.error("hub error: \(message, privacy: .public)")
+            lastError = HubErrorToast(message: message)
         }
     }
 

@@ -140,6 +140,93 @@ describe("connection", () => {
   });
 });
 
+describe("cwd validation", () => {
+  // Prevents: a misleading "Claude Code executable not found at .../cli.js"
+  // error when the user supplies a directory that doesn't exist. The SDK's
+  // chdir() failure surfaces as that confusing error; we want a clear
+  // "directory does not exist" instead, and the SDK must never be invoked.
+  it("rejects a non-existent directory with a clear error and skips the SDK", async () => {
+    let queryInvoked = false;
+    const runner = new MachineRunner({
+      hubUrl: `ws://localhost:${hubPort}`,
+      registrationToken: "test-token",
+      machineName: "Test",
+      queryFn: ((..._args: unknown[]) => {
+        queryInvoked = true;
+        async function* gen() {}
+        return gen();
+      }) as any,
+    });
+    await runner.connect();
+    await waitForRunnerMsg((m) => m.type === "runner_hello");
+
+    const errPromise = waitForRunnerMsg((m) => m.type === "session_error");
+    sendToRunner({
+      type: "hub_start_session",
+      sessionId: "s-bad-cwd",
+      directory: "/this/path/definitely/does/not/exist",
+      prompt: "hi",
+    });
+    const err = await errPromise;
+    assert.equal(err.sessionId, "s-bad-cwd");
+    assert.match(err.error, /Working directory does not exist/);
+    assert.equal(queryInvoked, false, "SDK must not be invoked for bad cwd");
+
+    runner.disconnect();
+  });
+
+  // Prevents: relative paths sneaking through. The SDK would resolve them
+  // against the runner process cwd, which is rarely what the user meant.
+  it("rejects a relative directory path", async () => {
+    const runner = new MachineRunner({
+      hubUrl: `ws://localhost:${hubPort}`,
+      registrationToken: "test-token",
+      machineName: "Test",
+      queryFn: mockQueryWithResult("hi"),
+    });
+    await runner.connect();
+    await waitForRunnerMsg((m) => m.type === "runner_hello");
+
+    const errPromise = waitForRunnerMsg((m) => m.type === "session_error");
+    sendToRunner({
+      type: "hub_start_session",
+      sessionId: "s-rel",
+      directory: "relative/path",
+      prompt: "hi",
+    });
+    const err = await errPromise;
+    assert.match(err.error, /absolute path/);
+
+    runner.disconnect();
+  });
+
+  // Prevents: a regular file slipping through (e.g. user pastes a file
+  // path instead of a project root).
+  it("rejects a path that exists but is not a directory", async () => {
+    const runner = new MachineRunner({
+      hubUrl: `ws://localhost:${hubPort}`,
+      registrationToken: "test-token",
+      machineName: "Test",
+      queryFn: mockQueryWithResult("hi"),
+    });
+    await runner.connect();
+    await waitForRunnerMsg((m) => m.type === "runner_hello");
+
+    // /etc/hosts exists on every test box and is a regular file.
+    const errPromise = waitForRunnerMsg((m) => m.type === "session_error");
+    sendToRunner({
+      type: "hub_start_session",
+      sessionId: "s-file",
+      directory: "/etc/hosts",
+      prompt: "hi",
+    });
+    const err = await errPromise;
+    assert.match(err.error, /not a directory/);
+
+    runner.disconnect();
+  });
+});
+
 describe("session lifecycle", () => {
   // Prevents: runner not streaming SDK events to hub
   it("streams text from SDK to hub", async () => {

@@ -1449,3 +1449,78 @@ describe("session_history reply routing", () => {
     await closeWs(runnerB);
   });
 });
+
+// ── delete_session ──────────────────────────────────────────────────────
+describe("delete_session", () => {
+  // Prevents: clients accumulating dead session rows in the sidebar with
+  // no way to remove them. Also covers the broadcast so other tabs see
+  // the deletion immediately.
+  it("removes the session from the DB and broadcasts the new list", async () => {
+    const tokens = await auth.register("user@test.com", "pass");
+    const account = db.getAccountByEmail("user@test.com")!;
+    const machine = db.createMachine(account.id, "Test Machine");
+    const session = db.createSession(account.id, machine.id, "/tmp", "idle");
+
+    // A connected runner is required because handleDeleteSession's
+    // ownership check goes through the same code path as start_session
+    // (resolving runner connectivity is *not* required, only ownership).
+    const runnerWs = await connectRunner(machine.registrationToken);
+    const clientWs = await connectClient(tokens.token);
+    await new Promise((r) => setTimeout(r, 100));
+
+    const listPromise = waitForMsg(
+      clientWs,
+      (m) => m.type === "session_list" && m.sessions.length === 0,
+    );
+    send(clientWs, { type: "delete_session", sessionId: session.id });
+
+    const list = await listPromise;
+    assert.equal(list.sessions.length, 0);
+    assert.equal(db.getSessionById(session.id), undefined);
+
+    await closeWs(clientWs);
+    await closeWs(runnerWs);
+  });
+
+  // Prevents: cross-account deletion. A bug in the WS layer must not let
+  // user B delete user A's sessions just by knowing/guessing the id.
+  it("rejects deletion of a session owned by a different account", async () => {
+    const tokensA = await auth.register("a@test.com", "pass");
+    const tokensB = await auth.register("b@test.com", "pass");
+    const accountA = db.getAccountByEmail("a@test.com")!;
+    const machineA = db.createMachine(accountA.id, "A");
+    const sessionA = db.createSession(accountA.id, machineA.id, "/tmp", "idle");
+
+    const clientB = await connectClient(tokensB.token);
+    await new Promise((r) => setTimeout(r, 100));
+
+    const errPromise = waitForMsg(clientB, (m) => m.type === "error");
+    send(clientB, { type: "delete_session", sessionId: sessionA.id });
+    const err = await errPromise;
+    assert.match(err.message, /Session not found/);
+
+    // Session must still exist for its real owner.
+    assert.ok(db.getSessionById(sessionA.id));
+
+    await closeWs(clientB);
+    void tokensA;
+  });
+
+  // Prevents: a client deleting a session that has already been removed
+  // from the DB getting silent success and thinking the row still exists.
+  it("returns Session not found for an unknown sessionId", async () => {
+    const tokens = await auth.register("user@test.com", "pass");
+    const clientWs = await connectClient(tokens.token);
+    await new Promise((r) => setTimeout(r, 100));
+
+    const errPromise = waitForMsg(clientWs, (m) => m.type === "error");
+    send(clientWs, {
+      type: "delete_session",
+      sessionId: "00000000-0000-0000-0000-000000000000",
+    });
+    const err = await errPromise;
+    assert.match(err.message, /Session not found/);
+
+    await closeWs(clientWs);
+  });
+});

@@ -43,6 +43,25 @@ describe("parseClientMessage", () => {
     assert.equal(msg.type, "list_sessions");
   });
 
+  // Prevents: delete_session being silently dropped if validation
+  // table or union drift apart from each other.
+  it("parses a valid delete_session message", () => {
+    const msg = parseClientMessage(
+      '{"type":"delete_session","sessionId":"s1"}',
+    );
+    assert.equal(msg.type, "delete_session");
+    if (msg.type === "delete_session") {
+      assert.equal(msg.sessionId, "s1");
+    }
+  });
+
+  it("rejects delete_session without sessionId", () => {
+    assert.throws(
+      () => parseClientMessage('{"type":"delete_session"}'),
+      /Missing required field: sessionId/,
+    );
+  });
+
   // Symmetric with parseHubMessage's hub_respond_to_prompt check.
   it("rejects respond_to_prompt with non-object response", () => {
     assert.throws(

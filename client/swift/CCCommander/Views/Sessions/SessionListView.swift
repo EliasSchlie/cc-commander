@@ -21,9 +21,19 @@ struct SessionListView: View {
             #if os(macOS)
             SessionRowView(session: session, machineName: machineName(for: session))
                 .tag(session.sessionId)
+                .contextMenu {
+                    Button("Delete", systemImage: "trash", role: .destructive) {
+                        delete(session)
+                    }
+                }
             #else
             NavigationLink(value: session.sessionId) {
                 SessionRowView(session: session, machineName: machineName(for: session))
+            }
+            .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                Button("Delete", systemImage: "trash", role: .destructive) {
+                    delete(session)
+                }
             }
             #endif
         }
@@ -77,5 +87,20 @@ struct SessionListView: View {
 
     private func machineName(for session: SessionMeta) -> String {
         appState.machines.first { $0.machineId == session.machineId }?.name ?? "Unknown"
+    }
+
+    private func delete(_ session: SessionMeta) {
+        Task {
+            do {
+                try await appState.deleteSession(sessionId: session.sessionId)
+            } catch {
+                // Network failures bubble up here; hub-side errors come
+                // back via the .error message channel and are surfaced
+                // by RootView's alert.
+                appState.lastError = HubErrorToast(
+                    message: "Failed to delete session: \(error.localizedDescription)",
+                )
+            }
+        }
     }
 }

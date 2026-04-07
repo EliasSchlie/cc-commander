@@ -82,7 +82,18 @@ struct CCCommanderApp: App {
                             if let prompt = ProcessInfo.processInfo.environment["CC_COMMANDER_TEST_PROMPT"],
                                !prompt.isEmpty,
                                let target = appState.onlineMachines.first {
-                                let dir = ProcessInfo.processInfo.environment["CC_COMMANDER_TEST_DIR"] ?? "/tmp"
+                                // Test mode requires an explicit directory.
+                                // Defaulting to /tmp here previously caused
+                                // every e2e run to leave a /tmp session row
+                                // in the hub DB forever, polluting the real
+                                // user's sidebar. Fail loudly so misconfigured
+                                // test runs are obvious instead of silently
+                                // contaminating shared state.
+                                guard let dir = ProcessInfo.processInfo.environment["CC_COMMANDER_TEST_DIR"], !dir.isEmpty else {
+                                    Self.testLog("CC_COMMANDER_TEST_DIR not set; refusing to start session in test mode")
+                                    log.error("CC_COMMANDER_TEST_DIR not set; refusing to start test session")
+                                    return
+                                }
                                 let knownIds = Set(appState.sessions.map(\.sessionId))
                                 Self.testLog("starting session on \(target.name) dir=\(dir)")
                                 do {

@@ -134,6 +134,43 @@ struct AppStateTests {
         #expect(state.sessionStreams["s1"]?.pendingText == "ab")
     }
 
+    // Prevents: regression of "Loading session..." infinite spinner.
+    // SessionDetailView used to attach the .task that requested history
+    // to its success branch, so selecting an idle session (no live
+    // stream) never triggered a fetch and the loading view never went
+    // away. The fix is to eagerly create a stream + request history
+    // from selectedSessionId.didSet -- this test pins that behavior.
+    @Test func selectingSessionEagerlyCreatesStream() {
+        let state = makeAppState()
+        state.handleMessage(.sessionList(makeSessions()))
+        #expect(state.sessionStreams["s1"] == nil)
+        state.selectedSessionId = "s1"
+        #expect(state.sessionStreams["s1"] != nil,
+                "Selecting a session must eagerly create its stream so the detail view never gets stuck on a Loading placeholder")
+    }
+
+    // Prevents: stale selectedSessionId pointing at a row removed from
+    // another tab. The session_list dispatch must clear the selection
+    // when the selected id no longer exists.
+    @Test func sessionListClearsStaleSelection() {
+        let state = makeAppState()
+        state.handleMessage(.sessionList(makeSessions()))
+        state.selectedSessionId = "s1"
+        // Simulate a delete arriving from another client.
+        let remaining = makeSessions().filter { $0.sessionId != "s1" }
+        state.handleMessage(.sessionList(remaining))
+        #expect(state.selectedSessionId == nil)
+    }
+
+    // Prevents: hub `.error` messages being silently swallowed (the old
+    // behavior just `print`ed them, leaving the user to wonder why
+    // "nothing happened" after a failed action).
+    @Test func errorMessageSurfacesAsToast() {
+        let state = makeAppState()
+        state.handleMessage(.error(message: "Machine is offline"))
+        #expect(state.lastError?.message == "Machine is offline")
+    }
+
     // Prevents: turn end doesn't flush text or advance turn boundary
     @Test func statusChangeFromRunningTriggersFlushTurn() {
         let state = makeAppState()

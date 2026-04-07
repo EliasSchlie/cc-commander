@@ -56,6 +56,9 @@ export function handleClientMessage(
     case "get_session_history":
       handleGetSessionHistory(ctx, conn, msg);
       break;
+    case "delete_session":
+      handleDeleteSession(ctx, conn, msg);
+      break;
   }
 }
 
@@ -182,6 +185,27 @@ function handleGetSessionHistory(
     sessionId: msg.sessionId,
     requestId,
   });
+}
+
+function handleDeleteSession(
+  ctx: WsContext,
+  conn: ClientConnection,
+  msg: { sessionId: string },
+): void {
+  // Look up the session and verify ownership *before* deleting so we
+  // can give the client a clear error on a phantom/foreign sessionId
+  // instead of a silent no-op.
+  const session = ctx.db.getSessionById(msg.sessionId);
+  if (!session || session.accountId !== conn.accountId) {
+    ctx.sendToClient(conn, { type: "error", message: "Session not found" });
+    return;
+  }
+  const removed = ctx.db.deleteSession(msg.sessionId, conn.accountId);
+  if (removed > 0) {
+    // Broadcast so every client on the account (including this one)
+    // sees the row vanish without having to refetch.
+    ctx.broadcastSessionList(conn.accountId);
+  }
 }
 
 /** Look up session + verify ownership + find online runner. Sends
