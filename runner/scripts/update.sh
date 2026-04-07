@@ -14,7 +14,9 @@
 
 set -eu
 
-REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+RUNNER_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+# Workspaces live at the monorepo root, one level above runner/.
+REPO_DIR="$(cd "$RUNNER_DIR/.." && pwd)"
 TARGET="${1:-unknown}"
 LOG="${HOME}/Library/Logs/cc-commander-runner-update.log"
 FAILURE_MARKER="${REPO_DIR}/.cc-commander-update-failure"
@@ -53,12 +55,14 @@ fi
 } >> "$LOG" 2>&1
 
 cd "$REPO_DIR"
+# Install at the workspace root so the runner picks up shared workspace
+# packages (e.g. @cc-commander/protocol) via the npm-managed symlinks.
 if [ -f package-lock.json ]; then
-    if ! npm ci --omit=dev >> "$LOG" 2>&1; then
+    if ! npm ci --omit=dev --workspace=cc-commander-runner --include-workspace-root >> "$LOG" 2>&1; then
         mark_failure "npm ci failed"
     fi
 else
-    if ! npm install --omit=dev >> "$LOG" 2>&1; then
+    if ! npm install --omit=dev --workspace=cc-commander-runner --include-workspace-root >> "$LOG" 2>&1; then
         mark_failure "npm install failed"
     fi
 fi

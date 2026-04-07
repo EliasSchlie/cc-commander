@@ -1,0 +1,14 @@
+{
+  "name": "cc-commander",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "protocol",
+    "hub",
+    "runner"
+  ],
+  "scripts": {
+    "test": "npm test --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present"
+  }
+}
