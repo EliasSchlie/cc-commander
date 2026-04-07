@@ -20,6 +20,7 @@ function envStr(name: string, fallback: string): string {
 
 const port = envInt("PORT", 3000);
 const dbPath = envStr("HUB_DB_PATH", "./hub.db");
+const version = envStr("VERSION", "");
 const jwtSecret = process.env.JWT_SECRET;
 
 if (!jwtSecret) {
@@ -39,11 +40,11 @@ if (jwtSecret.length < 32) {
 
 const db = new HubDb(dbPath);
 const auth = new AuthService(db, jwtSecret);
-const hub = new Hub({ port, db, auth });
+const hub = new Hub({ port, db, auth, version });
 
 await hub.start();
 console.log(
-  `[hub] listening on :${port} (db=${dbPath === ":memory:" ? "memory" : dbPath})`,
+  `[hub] listening on :${port} (db=${dbPath === ":memory:" ? "memory" : dbPath}, version=${version || "<unset>"})`,
 );
 
 let shuttingDown = false;

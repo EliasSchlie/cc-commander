@@ -1,8 +1,11 @@
 #!/usr/bin/env node
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { spawn, spawnSync } from "node:child_process";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { homedir, hostname } from "node:os";
 import { MachineRunner } from "./runner.ts";
+import { Updater } from "./updater.ts";
 
 interface RunnerFileConfig {
   hubUrl: string;
@@ -154,7 +157,7 @@ async function cmdRegister(
   }
 
   const cfg: RunnerFileConfig = {
-    hubUrl: toWsBase(hubUrl),
+    hubUrl: swapWsHttp(hubUrl, "ws"),
     registrationToken: create.data.registrationToken,
     machineName: name,
   };
@@ -164,20 +167,54 @@ async function cmdRegister(
   console.log(`[runner] start the runner with:  cc-commander-runner run`);
 }
 
-function toWsBase(httpUrl: string): string {
-  // Runner uses the same base URL but ws/wss; MachineRunner appends /ws/runner.
-  if (httpUrl.startsWith("https://"))
-    return "wss://" + httpUrl.slice("https://".length);
-  if (httpUrl.startsWith("http://"))
-    return "ws://" + httpUrl.slice("http://".length);
-  return httpUrl;
+// src/cli.ts → src → runner
+const RUNNER_REPO_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+
+/** Swap ws[s]:// for http[s]:// (or vice versa) on the same host. */
+function swapWsHttp(url: string, target: "ws" | "http"): string {
+  const u = new URL(url);
+  const secure = u.protocol === "https:" || u.protocol === "wss:";
+  u.protocol =
+    target === "ws" ? (secure ? "wss:" : "ws:") : secure ? "https:" : "http:";
+  return u.toString().replace(/\/$/, "");
+}
+
+/**
+ * Returns the runner's current git commit SHA, or "" if it can't be
+ * determined (no git, not a checkout, etc.). Used by the updater to
+ * compare against the hub's /api/version.
+ *
+ * Override with CC_COMMANDER_RUNNER_VERSION for testing.
+ */
+function detectRunnerVersion(): string {
+  const override = process.env.CC_COMMANDER_RUNNER_VERSION;
+  if (override) return override;
+  const result = spawnSync("git", ["rev-parse", "HEAD"], {
+    cwd: RUNNER_REPO_DIR,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "ignore"],
+  });
+  if (result.error) {
+    console.warn(
+      `[runner] could not detect git version (${result.error.message}); self-update disabled`,
+    );
+    return "";
+  }
+  if (result.status !== 0) {
+    console.warn(
+      `[runner] git rev-parse exited ${result.status}; self-update disabled`,
+    );
+    return "";
+  }
+  return result.stdout.trim();
 }
 
 async function cmdRun(flags: Record<string, string | boolean>): Promise<void> {
   const configPath = String(flags.config ?? DEFAULT_CONFIG_PATH);
   const cfg = readConfig(configPath);
+  const currentVersion = detectRunnerVersion();
   console.log(
-    `[runner] starting "${cfg.machineName}" → ${cfg.hubUrl} (config=${configPath})`,
+    `[runner] starting "${cfg.machineName}" → ${cfg.hubUrl} (config=${configPath}, version=${currentVersion || "<unknown>"})`,
   );
   const runner = new MachineRunner({
     hubUrl: cfg.hubUrl,
@@ -185,11 +222,47 @@ async function cmdRun(flags: Record<string, string | boolean>): Promise<void> {
     machineName: cfg.machineName,
   });
 
+  // Tracked so shutdown() can clear it. Without this, a Ctrl-C during the
+  // 5s reconnect window leaves a connect() pending after disconnect().
+  let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+
+  // onUpdateNeeded fires the spawn + exit; needs `updater` declared first
+  // to keep it on its own (never re-entered).
+  const updater = new Updater({
+    hubBaseUrl: swapWsHttp(cfg.hubUrl, "http"),
+    currentVersion,
+    pollIntervalMs:
+      parseInt(process.env.CC_COMMANDER_POLL_MS ?? "", 10) || undefined,
+    onUpdateNeeded: (hubVersion) => {
+      const script = join(RUNNER_REPO_DIR, "scripts", "update.sh");
+      console.log(`[updater] running ${script} → ${hubVersion}`);
+      const child = spawn("/bin/sh", [script, hubVersion], {
+        cwd: RUNNER_REPO_DIR,
+        detached: true,
+        stdio: "ignore",
+      });
+      child.on("error", (err) => {
+        console.error(
+          `[updater] failed to spawn update script: ${err.message}`,
+        );
+      });
+      child.unref();
+      console.log("[updater] exiting for launchd restart");
+      runner.disconnect();
+      process.exit(0);
+    },
+  });
+
   let shuttingDown = false;
   function shutdown(signal: string): void {
     if (shuttingDown) return;
     shuttingDown = true;
     console.log(`[runner] received ${signal}, shutting down...`);
+    if (reconnectTimer !== null) {
+      clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+    }
+    updater.stop();
     runner.disconnect();
     setTimeout(() => process.exit(0), 100);
   }
@@ -199,10 +272,15 @@ async function cmdRun(flags: Record<string, string | boolean>): Promise<void> {
   try {
     await runner.connect();
   } catch (err) {
-    console.error(`[runner] initial connect failed: ${(err as Error).message}`);
+    console.error(`[runner] initial connect failed: ${String(err)}`);
     console.error("[runner] will retry in 5s...");
-    setTimeout(() => runner.connect().catch(console.error), 5000);
+    reconnectTimer = setTimeout(() => {
+      reconnectTimer = null;
+      runner.connect().catch((e) => console.error(String(e)));
+    }, 5000);
   }
+
+  updater.start();
 }
 
 function usage(): void {

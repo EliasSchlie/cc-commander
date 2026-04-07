@@ -11,6 +11,11 @@ RUN npm ci --omit=dev \
 
 COPY src ./src
 
+# Set by CI on tag builds (e.g. ARG VERSION=v0.2.0). Runners poll
+# /api/version and self-update when their own VERSION differs.
+ARG VERSION=""
+ENV VERSION=${VERSION}
+
 ENV NODE_ENV=production \
     PORT=3000 \
     HUB_DB_PATH=/data/hub.db
