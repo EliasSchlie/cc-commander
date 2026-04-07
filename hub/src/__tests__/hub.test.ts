@@ -1042,6 +1042,187 @@ describe("rate limiting", () => {
     assert.equal(r2.status, 201);
     assert.equal(r3.status, 429);
   });
+
+  // #45: a determined attacker who creates N accounts (within the
+  // strict register limit) gets N × machineCreate quota unless we add
+  // a per-IP layer alongside the per-account one.
+  it("returns 429 when machine creation exceeds per-IP quota across accounts", async () => {
+    await hub.stop();
+    db.close();
+    db = new HubDb(":memory:");
+    auth = new AuthService(db, JWT_SECRET);
+    hub = new Hub({
+      port: 0,
+      db,
+      auth,
+      rateLimits: {
+        login: { capacity: 100, perMinute: 100 },
+        register: { capacity: 100, perMinute: 100 },
+        // Generous per-account so it can't be the limiter we hit.
+        machineCreate: { capacity: 100, perHour: 100 },
+        // Tight per-IP so the test exercises the new layer.
+        machineCreateIp: { capacity: 2, perHour: 0.0001 },
+      },
+    });
+    await hub.start();
+    const addr = hub.httpServer.address();
+    port = typeof addr === "object" && addr ? addr.port : 0;
+    baseUrl = `http://localhost:${port}`;
+
+    // Two accounts from "the same IP" (localhost in tests).
+    const a = await auth.register("a@test.com", "pw");
+    const b = await auth.register("b@test.com", "pw");
+    const r1 = await postJson("/api/machines", { name: "m1" }, a.token);
+    const r2 = await postJson("/api/machines", { name: "m2" }, b.token);
+    // Third request from EITHER account must hit the IP layer.
+    const r3 = await postJson("/api/machines", { name: "m3" }, a.token);
+    assert.equal(r1.status, 201);
+    assert.equal(r2.status, 201);
+    assert.equal(r3.status, 429);
+    assert.equal(
+      hub.metrics.snapshot()["hub.rate_limited{limiter=machine_ip}"],
+      1,
+    );
+  });
+
+  // #45: WS upgrade endpoints have no auth-side rate limit. Even
+  // rejected upgrades have non-zero cost (socket alloc, handshake, FD).
+  // Per-IP cap rejects with 429 BEFORE the upgrade completes.
+  it("returns 429 on excess /ws/client upgrades from one IP", async () => {
+    await hub.stop();
+    db.close();
+    db = new HubDb(":memory:");
+    auth = new AuthService(db, JWT_SECRET);
+    hub = new Hub({
+      port: 0,
+      db,
+      auth,
+      rateLimits: {
+        ...TEST_RATE_LIMITS,
+        wsUpgrade: { capacity: 2, perMinute: 0.0001 },
+      },
+    });
+    await hub.start();
+    const addr = hub.httpServer.address();
+    port = typeof addr === "object" && addr ? addr.port : 0;
+    baseUrl = `http://localhost:${port}`;
+
+    const tokens = await auth.register("u@test.com", "pw");
+    const ws1 = await connectClient(tokens.token);
+    const ws2 = await connectClient(tokens.token);
+    // Third upgrade attempt must hit the limiter and be rejected at
+    // the HTTP layer with a 429.
+    let rejected = false;
+    let statusCode = 0;
+    await new Promise<void>((resolve) => {
+      const ws = new WebSocket(
+        `ws://localhost:${port}/ws/client?token=${tokens.token}`,
+      );
+      ws.on("unexpected-response", (_req, res) => {
+        rejected = true;
+        statusCode = res.statusCode ?? 0;
+        resolve();
+      });
+      ws.on("open", () => resolve());
+      ws.on("error", () => resolve());
+    });
+    assert.equal(rejected, true, "third upgrade should have been rejected");
+    assert.equal(statusCode, 429);
+    // Metric must reflect the rejection so operators can tell a 429
+    // spike from a flat connection-count graph.
+    assert.equal(
+      hub.metrics.snapshot()["hub.rate_limited{limiter=ws_upgrade}"],
+      1,
+    );
+
+    await closeWs(ws1);
+    await closeWs(ws2);
+  });
+
+  // The verifyClient hook covers /ws/client and /ws/runner alike — lock
+  // the runner branch so a future split between client/runner upgrades
+  // doesn't silently lose the limit on one side.
+  it("returns 429 on excess /ws/runner upgrades from one IP", async () => {
+    await hub.stop();
+    db.close();
+    db = new HubDb(":memory:");
+    auth = new AuthService(db, JWT_SECRET);
+    hub = new Hub({
+      port: 0,
+      db,
+      auth,
+      rateLimits: {
+        ...TEST_RATE_LIMITS,
+        wsUpgrade: { capacity: 1, perMinute: 0.0001 },
+      },
+    });
+    await hub.start();
+    const addr = hub.httpServer.address();
+    port = typeof addr === "object" && addr ? addr.port : 0;
+    baseUrl = `http://localhost:${port}`;
+
+    const tokens = await auth.register("u@test.com", "pw");
+    const account = db.getAccountByEmail("u@test.com")!;
+    const machine = db.createMachine(account.id, "m");
+    void tokens;
+
+    const ws1 = await connectRunner(machine.registrationToken);
+    let rejected = false;
+    let statusCode = 0;
+    await new Promise<void>((resolve) => {
+      const ws = new WebSocket(
+        `ws://localhost:${port}/ws/runner?token=${machine.registrationToken}`,
+      );
+      ws.on("unexpected-response", (_req, res) => {
+        rejected = true;
+        statusCode = res.statusCode ?? 0;
+        resolve();
+      });
+      ws.on("open", () => resolve());
+      ws.on("error", () => resolve());
+    });
+    assert.equal(rejected, true);
+    assert.equal(statusCode, 429);
+
+    await closeWs(ws1);
+  });
+
+  // Independent-consumption invariant: when the IP layer has tokens
+  // but the per-account layer is empty, the per-account layer must
+  // still reject. This is asserted positively (not just by absence)
+  // so a future short-circuit can't silently re-introduce a bypass.
+  it("per-account rejection still fires when IP layer has tokens", async () => {
+    await hub.stop();
+    db.close();
+    db = new HubDb(":memory:");
+    auth = new AuthService(db, JWT_SECRET);
+    hub = new Hub({
+      port: 0,
+      db,
+      auth,
+      rateLimits: {
+        login: { capacity: 100, perMinute: 100 },
+        register: { capacity: 100, perMinute: 100 },
+        // Tight per-account, generous per-IP.
+        machineCreate: { capacity: 1, perHour: 0.0001 },
+        machineCreateIp: { capacity: 100, perHour: 100 },
+      },
+    });
+    await hub.start();
+    const addr = hub.httpServer.address();
+    port = typeof addr === "object" && addr ? addr.port : 0;
+    baseUrl = `http://localhost:${port}`;
+
+    const tokens = await auth.register("u@test.com", "pw");
+    const r1 = await postJson("/api/machines", { name: "m1" }, tokens.token);
+    const r2 = await postJson("/api/machines", { name: "m2" }, tokens.token);
+    assert.equal(r1.status, 201);
+    assert.equal(r2.status, 429);
+    assert.equal(
+      hub.metrics.snapshot()["hub.rate_limited{limiter=machine_account}"],
+      1,
+    );
+  });
 });
 
 // ── Input validation ────────────────────────────────────────────────────
