@@ -12,9 +12,6 @@ struct RootView: View {
                 AuthView()
             }
         }
-        // Surface hub-side errors to the user instead of dropping them on
-        // the floor. Driven by `AppState.lastError`; cleared when the
-        // user dismisses the alert.
         .alert(
             "Hub error",
             isPresented: Binding(

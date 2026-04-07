@@ -212,12 +212,9 @@ export class MachineRunner {
       `[runner] runSession start sid=${sessionId} cwd=${extra.cwd ?? "<none>"} resume=${extra.resume ?? "<none>"} promptLen=${prompt.length}`,
     );
 
-    // Validate cwd before invoking the SDK. Without this check the SDK
-    // chdirs into a missing/invalid directory and the resulting failure
-    // surfaces as a misleading "Claude Code executable not found at
-    // .../cli.js" error -- it's actually just a bad cwd, but the SDK
-    // blames the executable path. Catching it here gives the user a
-    // clear "directory does not exist" message.
+    // SDK chdir failures surface as "Claude Code executable not found
+    // at .../cli.js" -- catch the bad cwd here so the user sees the
+    // real cause.
     if (extra.cwd !== undefined) {
       const cwdError = validateCwd(extra.cwd);
       if (cwdError) {
@@ -572,16 +569,8 @@ export class MachineRunner {
   }
 }
 
-/**
- * Validate a working directory path before handing it to the SDK.
- *
- * Returns a human-readable error string on failure, or `null` on success.
- * Failures we want to catch:
- *   - relative paths (the SDK silently resolves these against the
- *     runner's cwd, which is rarely what the user meant)
- *   - missing paths
- *   - paths that exist but aren't directories (e.g. a regular file)
- */
+/** Returns an error string on failure (relative / missing / not a
+ *  directory), or null if `cwd` is safe to hand to the SDK. */
 function validateCwd(cwd: string): string | null {
   if (!isAbsolute(cwd)) {
     return `Working directory must be an absolute path (got "${cwd}")`;

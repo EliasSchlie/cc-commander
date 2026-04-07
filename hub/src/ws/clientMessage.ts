@@ -192,9 +192,8 @@ function handleDeleteSession(
   conn: ClientConnection,
   msg: { sessionId: string },
 ): void {
-  // Look up the session and verify ownership *before* deleting so we
-  // can give the client a clear error on a phantom/foreign sessionId
-  // instead of a silent no-op.
+  // Ownership check before delete so phantom/foreign ids get a clear
+  // error rather than a silent no-op.
   const session = ctx.db.getSessionById(msg.sessionId);
   if (!session || session.accountId !== conn.accountId) {
     ctx.sendToClient(conn, { type: "error", message: "Session not found" });
@@ -202,8 +201,6 @@ function handleDeleteSession(
   }
   const removed = ctx.db.deleteSession(msg.sessionId, conn.accountId);
   if (removed > 0) {
-    // Broadcast so every client on the account (including this one)
-    // sees the row vanish without having to refetch.
     ctx.broadcastSessionList(conn.accountId);
   }
 }

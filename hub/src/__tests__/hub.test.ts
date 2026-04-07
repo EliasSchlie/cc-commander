@@ -1452,18 +1452,12 @@ describe("session_history reply routing", () => {
 
 // ── delete_session ──────────────────────────────────────────────────────
 describe("delete_session", () => {
-  // Prevents: clients accumulating dead session rows in the sidebar with
-  // no way to remove them. Also covers the broadcast so other tabs see
-  // the deletion immediately.
   it("removes the session from the DB and broadcasts the new list", async () => {
     const tokens = await auth.register("user@test.com", "pass");
     const account = db.getAccountByEmail("user@test.com")!;
     const machine = db.createMachine(account.id, "Test Machine");
     const session = db.createSession(account.id, machine.id, "/tmp", "idle");
 
-    // A connected runner is required because handleDeleteSession's
-    // ownership check goes through the same code path as start_session
-    // (resolving runner connectivity is *not* required, only ownership).
     const runnerWs = await connectRunner(machine.registrationToken);
     const clientWs = await connectClient(tokens.token);
     await new Promise((r) => setTimeout(r, 100));
@@ -1482,8 +1476,8 @@ describe("delete_session", () => {
     await closeWs(runnerWs);
   });
 
-  // Prevents: cross-account deletion. A bug in the WS layer must not let
-  // user B delete user A's sessions just by knowing/guessing the id.
+  // Prevents: cross-account leakage where a bug in the WS layer would
+  // let one account delete another's sessions by guessing the id.
   it("rejects deletion of a session owned by a different account", async () => {
     const tokensA = await auth.register("a@test.com", "pass");
     const tokensB = await auth.register("b@test.com", "pass");
@@ -1506,8 +1500,6 @@ describe("delete_session", () => {
     void tokensA;
   });
 
-  // Prevents: a client deleting a session that has already been removed
-  // from the DB getting silent success and thinking the row still exists.
   it("returns Session not found for an unknown sessionId", async () => {
     const tokens = await auth.register("user@test.com", "pass");
     const clientWs = await connectClient(tokens.token);

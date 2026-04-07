@@ -6,12 +6,6 @@ struct SessionDetailView: View {
     @Environment(AppState.self) private var appState
 
     var body: some View {
-        // AppState.selectedSessionId.didSet eagerly creates a SessionStream
-        // and kicks off a history fetch on selection, so by the time the
-        // user sees this view the stream always exists. The previous
-        // "Loading session..." branch was unreachable in practice and
-        // could get stuck forever because its parent had no .task to
-        // actually request history -- gone now.
         if let session = appState.selectedSession,
            let stream = appState.selectedSessionStream {
             sessionContent(session: session, stream: stream)
@@ -69,8 +63,6 @@ struct SessionDetailView: View {
                 StatusBadge(status: session.status)
             }
         }
-        // History is requested by AppState.selectedSessionId.didSet --
-        // no view-driven .task needed.
     }
 }
 

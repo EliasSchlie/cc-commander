@@ -43,8 +43,6 @@ describe("parseClientMessage", () => {
     assert.equal(msg.type, "list_sessions");
   });
 
-  // Prevents: delete_session being silently dropped if validation
-  // table or union drift apart from each other.
   it("parses a valid delete_session message", () => {
     const msg = parseClientMessage(
       '{"type":"delete_session","sessionId":"s1"}',

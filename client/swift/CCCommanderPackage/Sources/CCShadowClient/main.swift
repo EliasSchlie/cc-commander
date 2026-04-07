@@ -66,10 +66,7 @@ func runShadow() async {
 
     // Optional: drive a session if asked
     if let prompt = env["CC_COMMANDER_TEST_PROMPT"], !prompt.isEmpty {
-        // Test mode requires an explicit directory. Defaulting to /tmp
-        // here previously caused every shadow run to leave a /tmp
-        // session row in the hub DB, polluting the real user's
-        // sidebar. Fail loudly instead.
+        // Required: a default would silently leave session rows in the shared hub DB.
         guard let dir = env["CC_COMMANDER_TEST_DIR"], !dir.isEmpty else {
             print("[shadow] FAIL: CC_COMMANDER_TEST_DIR not set")
             exit(1)

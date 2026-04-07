@@ -235,13 +235,8 @@ export class HubDb {
       .run(sdkSessionId, sessionId);
   }
 
-  /**
-   * Delete a session by id, scoped to its owning account so cross-account
-   * deletion is impossible regardless of bugs in the WS layer. Returns the
-   * number of rows actually removed (0 if not found / wrong account).
-   *
-   * No cascade: nothing else in the schema references `sessions.id`.
-   */
+  /** Account-scoped delete: cross-account ids match no rows even if the
+   *  WS layer's ownership check is bypassed. Returns rows removed. */
   deleteSession(sessionId: string, accountId: string): number {
     const result = this.db
       .prepare("DELETE FROM sessions WHERE id = ? AND account_id = ?")
