@@ -14,6 +14,17 @@ struct InputBarView: View {
                 .lineLimit(1...5)
                 .focused($isFocused)
                 .disabled(isGenerating)
+                // Plain Return = send. Modified Returns fall through:
+                // Shift+Return inserts a newline (multi-line field), and
+                // Cmd+Return is owned by the button's keyboardShortcut --
+                // re-handling it here would double-send.
+                .onKeyPress(phases: .down) { press in
+                    guard press.key == .return, press.modifiers.isEmpty else {
+                        return .ignored
+                    }
+                    send()
+                    return .handled
+                }
 
             Button {
                 send()

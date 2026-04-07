@@ -98,7 +98,16 @@ public final class AppState {
 
     public func sendPrompt(prompt: String) async throws {
         guard let id = selectedSessionId else { return }
-        try await connection.sendPrompt(sessionId: id, prompt: prompt)
+        // Optimistic render -- see `SessionStream.addUserMessage` for why.
+        streamFor(id).addUserMessage(prompt)
+        do {
+            try await connection.sendPrompt(sessionId: id, prompt: prompt)
+        } catch {
+            // InputBarView swallows the throw via `try?`, so surface the
+            // failure here or the user gets no feedback at all.
+            recordError("Failed to send: \(error.localizedDescription)")
+            throw error
+        }
     }
 
     public func respondToPrompt(promptId: String, response: UserPromptResponse) async throws {
