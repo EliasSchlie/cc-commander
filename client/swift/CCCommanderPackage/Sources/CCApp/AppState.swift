@@ -136,8 +136,8 @@ public final class AppState {
             updateSession(sessionId) { $0.status = .error }
             streamFor(sessionId).addError(error)
 
-        case .sessionHistory(let sessionId, _, let messages):
-            streamFor(sessionId).loadHistory(messages)
+        case .sessionHistory(let sessionId, _, let messages, let error):
+            streamFor(sessionId).loadHistory(messages, error: error)
 
         case .error(let message):
             print("Hub error: \(message)")

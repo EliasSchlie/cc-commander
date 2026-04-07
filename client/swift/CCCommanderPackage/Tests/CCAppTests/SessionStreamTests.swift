@@ -235,19 +235,28 @@ struct SessionStreamTests {
     // Prevents: marathon sessions OOM the client because entries grows
     // unbounded -- the hub does not store history, so this array is the
     // only place a long session lives.
+    //
+    // Marker overhead: when overflow happens an `.evictionMarker` is
+    // inserted at index 0. It does not count toward the cap, so total
+    // entries.count == cap + 1 after any eviction.
     @Test func entriesAreCappedWithEviction() {
         let stream = SessionStream(sessionId: "s1")
         let cap = SessionStream.maxEntries
         // Append cap+50 errors and verify only the newest cap survive,
-        // in the original order.
+        // with a single coalesced marker at the head accounting for 50.
         for i in 0..<(cap + 50) {
             stream.addError("err\(i)")
         }
-        #expect(stream.entries.count == cap)
-        if case .error(_, let firstMsg) = stream.entries.first {
-            #expect(firstMsg == "err50")
+        #expect(stream.entries.count == cap + 1)
+        if case .evictionMarker(_, let dropped) = stream.entries.first {
+            #expect(dropped == 50)
         } else {
-            Issue.record("first entry should be err50 after eviction")
+            Issue.record("first entry should be eviction marker")
+        }
+        if case .error(_, let firstReal) = stream.entries[1] {
+            #expect(firstReal == "err50")
+        } else {
+            Issue.record("entries[1] should be err50 after eviction")
         }
         if case .error(_, let lastMsg) = stream.entries.last {
             #expect(lastMsg == "err\(cap + 49)")
@@ -256,21 +265,51 @@ struct SessionStreamTests {
         }
     }
 
+    // Prevents: a marker per overflow tick instead of one running total.
+    // After many sequential evictions there must still be exactly one
+    // marker at index 0 with the cumulative count.
+    @Test func evictionMarkerCoalesces() {
+        let stream = SessionStream(sessionId: "s1")
+        let cap = SessionStream.maxEntries
+        // Push 3*cap entries -- 2*cap should end up dropped.
+        for i in 0..<(cap * 3) {
+            stream.addError("e\(i)")
+        }
+        let markers = stream.entries.filter {
+            if case .evictionMarker = $0 { return true }
+            return false
+        }
+        #expect(markers.count == 1)
+        if case .evictionMarker(_, let dropped) = stream.entries.first {
+            #expect(dropped == cap * 2)
+        } else {
+            Issue.record("expected single coalesced marker")
+        }
+        #expect(stream.entries.count == cap + 1)
+    }
+
     // Prevents: currentTurnStartIndex pointing past end-of-array after
-    // eviction, breaking the "current turn" rendering split.
+    // eviction, breaking the "current turn" rendering split. The marker
+    // insertion at index 0 must shift currentTurnStartIndex by 1 so it
+    // still points at the same logical entry.
     @Test func evictionAdjustsCurrentTurnStartIndex() {
         let stream = SessionStream(sessionId: "s1")
         stream.addError("first")
         stream.flushTurn()
-        let originalStart = stream.currentTurnStartIndex
-        #expect(originalStart == 1)
-        // Push enough entries to evict the first one.
+        #expect(stream.currentTurnStartIndex == 1)
+        // Push enough entries to evict "first" -- triggers marker insert.
         for i in 0..<SessionStream.maxEntries {
             stream.addError("e\(i)")
         }
-        #expect(stream.entries.count == SessionStream.maxEntries)
-        // currentTurnStartIndex was 1, one entry was evicted -> now 0.
-        #expect(stream.currentTurnStartIndex == 0)
+        #expect(stream.entries.count == SessionStream.maxEntries + 1)
+        // After eviction: index 0 is the marker. currentTurnStartIndex
+        // started at 1, was decremented to 0 by overflow trim, then
+        // bumped to 1 by marker insertion -- so it still points just
+        // past the marker (i.e. at the first real entry of the turn).
+        #expect(stream.currentTurnStartIndex == 1)
+        if case .evictionMarker = stream.entries[0] {} else {
+            Issue.record("entries[0] should be marker")
+        }
     }
 
     // Prevents: loadHistory bypassing the entry cap (regression: the
@@ -288,11 +327,106 @@ struct SessionStreamTests {
             ]))
         }
         stream.loadHistory(msgs)
-        #expect(stream.entries.count == cap)
-        if case .userMessage(_, let text) = stream.entries.first {
+        #expect(stream.entries.count == cap + 1)
+        if case .evictionMarker(_, let dropped) = stream.entries.first {
+            #expect(dropped == 100)
+        } else {
+            Issue.record("expected eviction marker at head")
+        }
+        if case .userMessage(_, let text) = stream.entries[1] {
             #expect(text == "m100")
         } else {
             Issue.record("expected userMessage m100 after eviction")
+        }
+    }
+
+    // Prevents: degraded session_history reply (timeout / no_session /
+    // fetch_failed) being indistinguishable from a healthy empty pane.
+    // The error code becomes a `.historyUnavailable` sentinel entry.
+    @Test func loadHistoryEmitsHistoryUnavailableOnError() {
+        let stream = SessionStream(sessionId: "s1")
+        stream.loadHistory([], error: "timeout")
+        #expect(stream.entries.count == 1)
+        if case .historyUnavailable(_, let code) = stream.entries.first {
+            #expect(code == "timeout")
+        } else {
+            Issue.record("expected historyUnavailable entry")
+        }
+    }
+
+    // Prevents: turnStart==0 ("entire session is current turn") being
+    // mishandled when the entry at index 0 is itself evicted. After the
+    // marker is inserted, the turn must logically span the surviving
+    // real entries -- i.e. start at index 1, just past the marker.
+    @Test func evictionFromTurnStartZeroPointsPastMarker() {
+        let stream = SessionStream(sessionId: "s1")
+        let cap = SessionStream.maxEntries
+        // Fill exactly to cap so currentTurnStartIndex stays at 0 (no
+        // flushTurn ever called).
+        for i in 0..<cap {
+            stream.addError("e\(i)")
+        }
+        #expect(stream.currentTurnStartIndex == 0)
+        // Trigger first overflow.
+        stream.addError("trigger")
+        // Expect: marker at 0, surviving real entries [1...cap], turn
+        // start at 1 (first real entry).
+        #expect(stream.entries.count == cap + 1)
+        #expect(stream.currentTurnStartIndex == 1)
+        if case .evictionMarker = stream.entries[0] {} else {
+            Issue.record("entries[0] should be marker")
+        }
+    }
+
+    // Prevents: marker coalescing math drifting after a flushTurn() in
+    // the middle of an evicting session -- the turn boundary must move
+    // with the trim, and the marker count must accumulate across it.
+    @Test func evictionMarkerCoalescesAcrossFlushTurn() {
+        let stream = SessionStream(sessionId: "s1")
+        let cap = SessionStream.maxEntries
+        for i in 0..<(cap + 20) {
+            stream.addError("e\(i)")
+        }
+        if case .evictionMarker(_, let droppedAfterFirst) = stream.entries.first {
+            #expect(droppedAfterFirst == 20)
+        } else {
+            Issue.record("expected marker after first batch")
+        }
+        stream.flushTurn()
+        for i in 0..<30 {
+            stream.addError("late\(i)")
+        }
+        let markers = stream.entries.filter {
+            if case .evictionMarker = $0 { return true }
+            return false
+        }
+        #expect(markers.count == 1)
+        if case .evictionMarker(_, let dropped) = stream.entries.first {
+            #expect(dropped == 50)
+        } else {
+            Issue.record("expected coalesced marker")
+        }
+        #expect(stream.entries.count == cap + 1)
+    }
+
+    // Prevents: error sentinel being dropped when the loaded history
+    // already filled the cap. The cliff marker must survive the trim.
+    @Test func historyUnavailableSurvivesCap() {
+        let stream = SessionStream(sessionId: "s1")
+        let cap = SessionStream.maxEntries
+        var msgs: [AnyCodable] = []
+        for i in 0..<(cap + 10) {
+            msgs.append(.dictionary([
+                "role": .string("user"),
+                "content": .string("m\(i)"),
+            ]))
+        }
+        stream.loadHistory(msgs, error: "fetch_failed")
+        // historyUnavailable was appended last; it must still be present.
+        if case .historyUnavailable(_, let code) = stream.entries.last {
+            #expect(code == "fetch_failed")
+        } else {
+            Issue.record("historyUnavailable should be last entry")
         }
     }
 

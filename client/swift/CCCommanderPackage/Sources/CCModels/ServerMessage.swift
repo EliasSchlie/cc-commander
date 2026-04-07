@@ -11,7 +11,7 @@ public enum ServerMessage: Sendable {
     case sessionStatus(sessionId: String, status: SessionStatus, lastMessagePreview: String?)
     case sessionDone(SessionDonePayload)
     case sessionError(sessionId: String, error: String)
-    case sessionHistory(sessionId: String, requestId: String, messages: [AnyCodable])
+    case sessionHistory(sessionId: String, requestId: String, messages: [AnyCodable], error: String?)
     case error(message: String)
 }
 
@@ -90,7 +90,8 @@ extension ServerMessage: Decodable {
             self = .sessionHistory(
                 sessionId: try c.decode(String.self, forKey: .sessionId),
                 requestId: try c.decode(String.self, forKey: .requestId),
-                messages: try c.decode([AnyCodable].self, forKey: .messages)
+                messages: try c.decode([AnyCodable].self, forKey: .messages),
+                error: try c.decodeIfPresent(String.self, forKey: .error)
             )
 
         case .error:
