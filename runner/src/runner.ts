@@ -353,6 +353,14 @@ export class MachineRunner {
         if (Array.isArray(content)) {
           for (const bl of content) {
             if (bl.type === "tool_use" && bl.name !== ASK_USER_TOOL) {
+              if (typeof bl.id !== "string") {
+                // Surface SDK shape drift at the source instead of as a
+                // silent hub-side rejection on a missing toolCallId.
+                console.error(
+                  `[runner] tool_use missing id: ${JSON.stringify(bl).slice(0, 200)}`,
+                );
+                continue;
+              }
               this.sendToHub({
                 type: "tool_call",
                 sessionId,
@@ -370,6 +378,12 @@ export class MachineRunner {
         if (Array.isArray(content)) {
           for (const bl of content) {
             if (bl.type === "tool_result") {
+              if (typeof bl.tool_use_id !== "string") {
+                console.error(
+                  `[runner] tool_result missing tool_use_id: ${JSON.stringify(bl).slice(0, 200)}`,
+                );
+                continue;
+              }
               const text = extractToolResultText(bl.content);
               if (text)
                 this.sendToHub({
