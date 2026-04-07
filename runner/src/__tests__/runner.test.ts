@@ -602,3 +602,97 @@ describe("protocol validation", () => {
     runner.disconnect();
   });
 });
+
+// ── Resync (runner restart recovery) ────────────────────────────────────
+
+describe("hub_runner_resync", () => {
+  // Prevents: runner restart causing the next prompt on a pre-existing
+  // session to start a fresh SDK conversation. The runner has no
+  // on-disk state for sdkSessionIds; the hub replays them on connect
+  // and the runner must use them as the `resume:` arg on the SDK call.
+  it("populates sdkSessionIds and resumes the right SDK session", async () => {
+    let capturedResume: string | undefined;
+    const runner = new MachineRunner({
+      hubUrl: `ws://localhost:${hubPort}`,
+      registrationToken: "test-token",
+      machineName: "Test",
+      queryFn: ((args: { prompt: string; options: { resume?: string } }) => {
+        capturedResume = args.options.resume;
+        async function* gen() {
+          yield {
+            type: "result",
+            session_id: args.options.resume ?? "sdk-fresh",
+            num_turns: 1,
+            duration_ms: 1,
+          };
+        }
+        return gen();
+      }) as any,
+    });
+    await runner.connect();
+    await waitForRunnerMsg((m) => m.type === "runner_hello");
+
+    // Simulate the hub pushing the resync immediately after registering
+    // the runner. Two entries: only s-existing should win when its
+    // prompt arrives.
+    sendToRunner({
+      type: "hub_runner_resync",
+      sessions: [
+        { sessionId: "s-existing", sdkSessionId: "sdk-restored" },
+        { sessionId: "s-other", sdkSessionId: "sdk-other" },
+      ],
+    });
+    await new Promise((r) => setTimeout(r, 50));
+
+    // The user sends a follow-up prompt on the pre-existing session.
+    sendToRunner({
+      type: "hub_send_prompt",
+      sessionId: "s-existing",
+      prompt: "what were we doing?",
+    });
+    await new Promise((r) => setTimeout(r, 200));
+
+    assert.equal(
+      capturedResume,
+      "sdk-restored",
+      "runner must pass the restored sdkSessionId as `resume:`",
+    );
+    runner.disconnect();
+  });
+
+  // Prevents: a stale sdkSessionId left in memory from a previous
+  // runner-internal state surviving across a resync, which would mask
+  // hub-authoritative truth.
+  it("replaces the in-memory map outright on resync", async () => {
+    const runner = new MachineRunner({
+      hubUrl: `ws://localhost:${hubPort}`,
+      registrationToken: "test-token",
+      machineName: "Test",
+      queryFn: mockQueryWithResult("done", "sdk-from-query"),
+    });
+    await runner.connect();
+    await waitForRunnerMsg((m) => m.type === "runner_hello");
+
+    // Plant a stale entry by completing a session (the finally block
+    // copies sdkSessionId into sdkSessionIds).
+    sendToRunner({
+      type: "hub_start_session",
+      sessionId: "s-stale",
+      directory: "/tmp",
+      prompt: "hi",
+    });
+    await new Promise((r) => setTimeout(r, 200));
+    assert.equal(runner.sdkSessionIds.get("s-stale"), "sdk-from-query");
+
+    // Resync says: only s-fresh exists. Stale entry must vanish.
+    sendToRunner({
+      type: "hub_runner_resync",
+      sessions: [{ sessionId: "s-fresh", sdkSessionId: "sdk-fresh" }],
+    });
+    await new Promise((r) => setTimeout(r, 50));
+
+    assert.equal(runner.sdkSessionIds.get("s-stale"), undefined);
+    assert.equal(runner.sdkSessionIds.get("s-fresh"), "sdk-fresh");
+    runner.disconnect();
+  });
+});

@@ -463,10 +463,24 @@ export class Hub {
     this.runners.set(machine.id, conn);
     this.config.db.updateMachineLastSeen(machine.id);
     this.broadcastMachineList(machine.accountId);
+    // Resync the runner's in-memory sdkSessionId map from the DB. The
+    // runner has no on-disk state of its own, so without this its
+    // first prompt on a pre-existing session would start a fresh SDK
+    // session (no `resume:`), losing all conversation history. Always
+    // sent -- even an empty list lets the runner rely on receiving
+    // exactly one resync per connect.
+    const resumable = this.config.db.listResumableSessionsForMachine(
+      machine.id,
+    );
+    this.sendToRunner(conn, {
+      type: "hub_runner_resync",
+      sessions: resumable,
+    });
     this.log.info("runner connected", {
       machineId: machine.id,
       machineName: machine.name,
       accountId: machine.accountId,
+      resyncCount: resumable.length,
     });
 
     ws.on("message", (data) => {
@@ -485,10 +499,15 @@ export class Hub {
     ws.on("close", () => {
       if (this.runners.get(machine.id)?.ws === ws) {
         this.runners.delete(machine.id);
-        const affected = this.config.db.markSessionsErrorForMachine(
-          machine.id,
-          "Runner disconnected",
-        );
+        // Demote any active session to idle. Previously these were
+        // marked as `error: Runner disconnected`, which was wrong: the
+        // SDK conversation jsonl on disk is intact and the runner can
+        // resume mid-conversation as soon as it reconnects (see the
+        // resync block in handleRunnerConnection above). Idle is the
+        // honest description -- the runner isn't generating right now,
+        // but the conversation isn't lost. Machine offline-ness is
+        // already surfaced separately via `enrichedMachineList`.
+        const affected = this.config.db.markSessionsIdleForMachine(machine.id);
         // Reply will never come from a disconnected runner.
         this.pendingHistory.dropMatching(
           (entry) => entry.machineId === machine.id,
@@ -501,7 +520,7 @@ export class Hub {
           machineId: machine.id,
           machineName: machine.name,
           accountId: machine.accountId,
-          sessionsErrored: affected,
+          sessionsIdled: affected,
         });
       }
     });

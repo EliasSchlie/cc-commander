@@ -4,6 +4,7 @@ import type {
   SessionMeta,
   SessionStatus,
   MachineInfo,
+  ResumableSession,
 } from "@cc-commander/protocol";
 
 export interface AccountRow {
@@ -347,24 +348,65 @@ export class HubDb {
     return result.changes;
   }
 
-  /** Marks all non-idle sessions on a machine as errored. Returns the number affected. */
-  markSessionsErrorForMachine(machineId: string, errorMessage: string): number {
+  /**
+   * Demotes any active session on a machine to `idle` when the runner
+   * disconnects. Previously these were marked as `error: Runner
+   * disconnected`, which was wrong: the SDK session jsonl on disk is
+   * intact, and on the runner's next connect we resync the
+   * sessionId→sdkSessionId map (see `listResumableSessionsForMachine`)
+   * so the user can resume mid-conversation. Idle is the honest
+   * description: the runner isn't generating right now, but the
+   * conversation is preserved. Machine offline-ness is already
+   * surfaced separately via `enrichedMachineList`.
+   *
+   * `last_message_preview` is left untouched on purpose -- the prior
+   * preview ("...applying patch", "Edit src/foo.ts", etc.) is what the
+   * user wants to see in the sidebar after coming back from a network
+   * blip, not "Runner disconnected".
+   *
+   * Returns the number affected.
+   */
+  markSessionsIdleForMachine(machineId: string): number {
     // Type anchor: rename a SessionStatus value and these will fail to compile.
-    const errorStatus: SessionStatus = "error";
+    const idleStatus: SessionStatus = "idle";
     const activeStatuses: SessionStatus[] = ["running", "waiting_for_input"];
     const placeholders = activeStatuses.map(() => "?").join(", ");
     const result = this.db
       .prepare(
-        `UPDATE sessions SET status = ?, last_message_preview = ?, error_message = ?, ended_at = datetime('now'), last_activity = datetime('now') WHERE machine_id = ? AND status IN (${placeholders})`,
+        `UPDATE sessions SET status = ?, ended_at = datetime('now'), last_activity = datetime('now') WHERE machine_id = ? AND status IN (${placeholders})`,
       )
-      .run(
-        errorStatus,
-        errorMessage,
-        errorMessage,
-        machineId,
-        ...activeStatuses,
-      );
+      .run(idleStatus, machineId, ...activeStatuses);
     return result.changes;
+  }
+
+  /**
+   * All non-archived sessions on a machine that have an SDK session id
+   * assigned, i.e. the ones a reconnecting runner can resume. Sent on
+   * `hub_runner_resync` so the runner can rebuild the in-memory
+   * `sessionId → sdkSessionId` map it lost on restart.
+   *
+   * Capped to mirror the runner-side `MAX_SDK_SESSION_IDS` LRU bound.
+   * Most-recently-active first so a runner with thousands of historic
+   * sessions still gets the ones the user is likely to touch next.
+   */
+  listResumableSessionsForMachine(
+    machineId: string,
+    limit = 1000,
+  ): ResumableSession[] {
+    const rows = this.db
+      .prepare(
+        `SELECT id, sdk_session_id FROM sessions
+           WHERE machine_id = ?
+             AND archived_at IS NULL
+             AND sdk_session_id IS NOT NULL
+           ORDER BY last_activity DESC
+           LIMIT ?`,
+      )
+      .all(machineId, limit) as Array<{ id: string; sdk_session_id: string }>;
+    return rows.map((r) => ({
+      sessionId: r.id,
+      sdkSessionId: r.sdk_session_id,
+    }));
   }
 
   // ── Refresh Tokens ────────────────────────────────────────────────────

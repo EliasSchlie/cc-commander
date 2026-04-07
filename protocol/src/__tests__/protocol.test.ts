@@ -272,6 +272,63 @@ describe("parseHubMessage", () => {
     );
     assert.equal(msg.type, "hub_respond_to_prompt");
   });
+
+  // hub_runner_resync repopulates the runner's sdkSessionId map after a
+  // restart. Empty list is the steady-state for fresh runners and must
+  // parse cleanly.
+  it("accepts hub_runner_resync with empty sessions", () => {
+    const msg = parseHubMessage('{"type":"hub_runner_resync","sessions":[]}');
+    assert.equal(msg.type, "hub_runner_resync");
+    if (msg.type === "hub_runner_resync") {
+      assert.deepEqual(msg.sessions, []);
+    }
+  });
+
+  it("accepts hub_runner_resync with valid entries", () => {
+    const msg = parseHubMessage(
+      '{"type":"hub_runner_resync","sessions":[{"sessionId":"s1","sdkSessionId":"sdk1"}]}',
+    );
+    assert.equal(msg.type, "hub_runner_resync");
+    if (msg.type === "hub_runner_resync") {
+      assert.equal(msg.sessions.length, 1);
+      assert.equal(msg.sessions[0]!.sessionId, "s1");
+      assert.equal(msg.sessions[0]!.sdkSessionId, "sdk1");
+    }
+  });
+
+  it("rejects hub_runner_resync without sessions field", () => {
+    assert.throws(
+      () => parseHubMessage('{"type":"hub_runner_resync"}'),
+      /Missing required field: sessions/,
+    );
+  });
+
+  it("rejects hub_runner_resync with non-array sessions", () => {
+    assert.throws(
+      () => parseHubMessage('{"type":"hub_runner_resync","sessions":"oops"}'),
+      /must be an array/,
+    );
+  });
+
+  it("rejects hub_runner_resync with empty sessionId entry", () => {
+    assert.throws(
+      () =>
+        parseHubMessage(
+          '{"type":"hub_runner_resync","sessions":[{"sessionId":"","sdkSessionId":"sdk1"}]}',
+        ),
+      /non-empty sessionId and sdkSessionId/,
+    );
+  });
+
+  it("rejects hub_runner_resync with missing sdkSessionId", () => {
+    assert.throws(
+      () =>
+        parseHubMessage(
+          '{"type":"hub_runner_resync","sessions":[{"sessionId":"s1"}]}',
+        ),
+      /non-empty sessionId and sdkSessionId/,
+    );
+  });
 });
 
 describe("serialize", () => {

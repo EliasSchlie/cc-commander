@@ -184,11 +184,42 @@ export class MachineRunner {
       case "hub_get_history":
         this.getHistory(msg.sessionId, msg.requestId);
         break;
+      case "hub_runner_resync":
+        this.handleResync(msg.sessions);
+        break;
       default:
         this.log.warn("unhandled hub message type", {
           msgType: (msg as any).type,
         });
     }
+  }
+
+  /**
+   * Repopulate the in-memory `sessionId → sdkSessionId` map from the
+   * hub on (re)connect. The runner has no on-disk state of its own;
+   * on a process restart this map vanishes, and without resync the
+   * next `hub_send_prompt` for an existing session would resolve
+   * `sdkSessionId` to undefined and start a fresh SDK conversation
+   * with no `resume:` -- losing all history. The hub knows the
+   * mapping (it's in the DB) and pushes it here.
+   *
+   * Replaces the existing map outright: the hub's view is canonical,
+   * any stale entries from before reconnect should be dropped. The
+   * hub already caps the list, but we enforce MAX_SDK_SESSION_IDS
+   * defensively here in case the bound drifts.
+   */
+  private handleResync(
+    sessions: ReadonlyArray<{ sessionId: string; sdkSessionId: string }>,
+  ): void {
+    this.sdkSessionIds = new Map();
+    const capped = sessions.slice(0, MAX_SDK_SESSION_IDS);
+    for (const { sessionId, sdkSessionId } of capped) {
+      this.sdkSessionIds.set(sessionId, sdkSessionId);
+    }
+    this.log.info("runner resync applied", {
+      received: sessions.length,
+      applied: capped.length,
+    });
   }
 
   private resolveSdkSessionId(sessionId: string): string | undefined {

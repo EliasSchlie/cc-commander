@@ -30,6 +30,43 @@ function connectRunner(registrationToken: string): Promise<WebSocket> {
   });
 }
 
+/**
+ * Like `connectRunner` but starts buffering hub→runner messages from
+ * before `open` fires, so tests can assert on messages the hub pushes
+ * synchronously inside its connection handler (e.g. `hub_runner_resync`).
+ * Without the early-attached buffer those messages can race the test's
+ * `waitForMsg` listener and be silently dropped.
+ */
+function connectRunnerWithBuffer(
+  registrationToken: string,
+): Promise<{ ws: WebSocket; messages: any[] }> {
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocket(
+      `ws://localhost:${port}/ws/runner?token=${registrationToken}`,
+    );
+    const messages: any[] = [];
+    ws.on("message", (data: Buffer) => {
+      messages.push(JSON.parse(data.toString()));
+    });
+    ws.on("open", () => resolve({ ws, messages }));
+    ws.on("error", reject);
+  });
+}
+
+async function waitForBuffered(
+  messages: any[],
+  predicate: (msg: any) => boolean,
+  timeoutMs = 2000,
+): Promise<any> {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const found = messages.find(predicate);
+    if (found) return found;
+    await new Promise((r) => setTimeout(r, 10));
+  }
+  throw new Error("Timeout waiting for buffered message");
+}
+
 function waitForMsg(
   ws: WebSocket,
   predicate: (msg: any) => boolean,
@@ -530,8 +567,13 @@ describe("machine registration", () => {
 // ── Runner disconnect → session cleanup ─────────────────────────────────
 
 describe("runner disconnect cleanup", () => {
-  // Prevents: sessions stuck in 'running' forever after the runner drops
-  it("marks running sessions as errored when the runner disconnects", async () => {
+  // Prevents: sessions stuck in 'running' forever after the runner drops.
+  // The previous behavior marked them as `error: Runner disconnected`,
+  // which was wrong: the SDK conversation jsonl on disk is intact and
+  // the runner can resume on reconnect via hub_runner_resync. Idle is
+  // the honest description; machine offline-ness is surfaced separately
+  // through the machine list.
+  it("demotes running sessions to idle when the runner disconnects", async () => {
     const tokens = await auth.register("user@test.com", "pass");
     const account = db.getAccountByEmail("user@test.com")!;
     const machine = db.createMachine(account.id, "Test Machine");
@@ -555,28 +597,91 @@ describe("runner disconnect cleanup", () => {
     assert.equal(sessions[0].status, "running");
     const sessionId = sessions[0].sessionId;
 
-    // Now drop the runner. Client should see updated session list with status=error.
-    const errorListPromise = waitForMsg(
+    // Now drop the runner. Client should see updated session list with status=idle.
+    const idleListPromise = waitForMsg(
       clientWs,
       (m) =>
         m.type === "session_list" &&
         m.sessions.some(
-          (s: any) => s.sessionId === sessionId && s.status === "error",
+          (s: any) => s.sessionId === sessionId && s.status === "idle",
         ),
     );
     await closeWs(runnerWs);
-    const errorList = await errorListPromise;
-    const errored = errorList.sessions.find(
-      (s: any) => s.sessionId === sessionId,
-    );
-    assert.equal(errored.status, "error");
-    assert.equal(errored.lastMessagePreview, "Runner disconnected");
+    const idleList = await idleListPromise;
+    const idled = idleList.sessions.find((s: any) => s.sessionId === sessionId);
+    assert.equal(idled.status, "idle");
 
-    // DB persists the error state
+    // DB persists the idle state and never flips to error.
     const persisted = db.getSessionById(sessionId)!;
-    assert.equal(persisted.status, "error");
+    assert.equal(persisted.status, "idle");
+    assert.equal(persisted.errorMessage, null);
 
     await closeWs(clientWs);
+  });
+
+  // Prevents: runner restart causing the next prompt on a pre-existing
+  // session to start a fresh SDK conversation (no `resume:`), losing all
+  // history. Hub must replay the sessionId→sdkSessionId map on every
+  // runner connect, sourced from the DB.
+  it("sends hub_runner_resync to a fresh runner with the DB's sdk_session_ids", async () => {
+    const tokens = await auth.register("resync@test.com", "pass");
+    const account = db.getAccountByEmail("resync@test.com")!;
+    const machine = db.createMachine(account.id, "Persistent");
+
+    // Pre-seed the DB as if the runner had been alive in a previous
+    // life: two sessions with sdk ids, one without (excluded), one
+    // archived (excluded).
+    const live1 = db.createSession(account.id, machine.id, "/a", "idle");
+    const live2 = db.createSession(account.id, machine.id, "/b", "idle");
+    const noSdk = db.createSession(account.id, machine.id, "/c", "idle");
+    const archived = db.createSession(account.id, machine.id, "/d", "idle");
+    db.updateSessionSdkId(live1.id, "sdk-1");
+    db.updateSessionSdkId(live2.id, "sdk-2");
+    db.updateSessionSdkId(archived.id, "sdk-archived");
+    db.archiveSession(archived.id, account.id);
+
+    // Now a runner reconnects for that machine. It should immediately
+    // receive a hub_runner_resync containing exactly the two live
+    // sessions with sdk ids. Use the buffered helper -- the hub sends
+    // resync synchronously inside the connection handler, so it can
+    // arrive before a regular waitForMsg listener attaches.
+    const { ws: runnerWs, messages } = await connectRunnerWithBuffer(
+      machine.registrationToken,
+    );
+    const resync = await waitForBuffered(
+      messages,
+      (m) => m.type === "hub_runner_resync",
+    );
+    assert.equal(resync.sessions.length, 2);
+    const ids = new Set(resync.sessions.map((s: any) => s.sessionId));
+    assert.ok(ids.has(live1.id));
+    assert.ok(ids.has(live2.id));
+    assert.ok(!ids.has(noSdk.id));
+    assert.ok(!ids.has(archived.id));
+    const e1 = resync.sessions.find((s: any) => s.sessionId === live1.id);
+    assert.equal(e1.sdkSessionId, "sdk-1");
+
+    await closeWs(runnerWs);
+  });
+
+  // Prevents: regression where the hub stops sending resync once a
+  // machine has zero resumable sessions (the runner relies on receiving
+  // exactly one resync per connect).
+  it("sends an empty hub_runner_resync to a brand-new runner", async () => {
+    await auth.register("fresh@test.com", "pass");
+    const account = db.getAccountByEmail("fresh@test.com")!;
+    const machine = db.createMachine(account.id, "Brand New");
+
+    const { ws: runnerWs, messages } = await connectRunnerWithBuffer(
+      machine.registrationToken,
+    );
+    const resync = await waitForBuffered(
+      messages,
+      (m) => m.type === "hub_runner_resync",
+    );
+    assert.deepEqual(resync.sessions, []);
+
+    await closeWs(runnerWs);
   });
 });
 
@@ -1690,22 +1795,20 @@ describe("session lifecycle in DB", () => {
 
   // Prevents: machine-disconnect → reconnect → recovery leaving the
   // recovered session stuck with the disconnect-time ended_at, which
-  // would mis-classify it as "still failed" in post-mortem queries
+  // would mis-classify it as "still failed" in post-mortem queries.
+  // Disconnect now demotes to idle (not error) -- the SDK conversation
+  // jsonl is intact and the runner can resume on reconnect.
   it("recovers ended_at after a machine disconnect mark + restart", async () => {
     const tokens = await auth.register("disco@test.com", "password");
     const accountId = auth.verifyToken(tokens.token).accountId;
     const machine = db.createMachine(accountId, "lab");
     const sess = db.createSession(accountId, machine.id, "/w", "running");
     // Simulate hub-side disconnect handling.
-    const affected = db.markSessionsErrorForMachine(
-      machine.id,
-      "Runner disconnected",
-    );
+    const affected = db.markSessionsIdleForMachine(machine.id);
     assert.equal(affected, 1);
-    const errored = db.getSessionById(sess.id)!;
-    assert.equal(errored.status, "error");
-    assert.equal(errored.errorMessage, "Runner disconnected");
-    assert.ok(errored.endedAt);
+    const idled = db.getSessionById(sess.id)!;
+    assert.equal(idled.status, "idle");
+    assert.ok(idled.endedAt);
     // Runner reconnects, session is restarted -> recovery clears ended_at.
     db.updateSessionStatus(sess.id, "running");
     const recovered = db.getSessionById(sess.id)!;
