@@ -1,11 +1,11 @@
 import { WebSocket } from "ws";
 import { query, getSessionMessages } from "@anthropic-ai/claude-agent-sdk";
-import { parseHubMessage, serialize } from "./protocol.ts";
+import { parseHubMessage, serialize } from "@cc-commander/protocol";
 import type {
   HubToRunnerMsg,
   RunnerToHubMsg,
   UserPromptResponse,
-} from "./protocol.ts";
+} from "@cc-commander/protocol";
 
 const ASK_USER_TOOL = "AskUserQuestion";
 const MAX_SDK_SESSION_IDS = 1000;
