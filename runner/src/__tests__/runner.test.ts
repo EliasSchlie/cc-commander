@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { WebSocket, WebSocketServer } from "ws";
 import { createServer } from "node:http";
 import { MachineRunner } from "../runner.ts";
-import type { HubToRunnerMsg, RunnerToHubMsg } from "../protocol.ts";
+import type { HubToRunnerMsg, RunnerToHubMsg } from "@cc-commander/protocol";
 
 let mockHub: ReturnType<typeof createServer>;
 let wss: WebSocketServer;

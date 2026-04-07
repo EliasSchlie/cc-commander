@@ -1,6 +1,8 @@
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { HubDb } from "../db.ts";
+import { HubDb, sqliteToIso8601 } from "../db.ts";
+
+const ISO8601_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/;
 
 let db: HubDb;
 
@@ -158,5 +160,60 @@ describe("refresh tokens", () => {
     const token = db.createRefreshToken(account.id, "2030-01-01T00:00:00Z");
     db.deleteRefreshToken(token);
     assert.equal(db.getRefreshToken(token), undefined);
+  });
+});
+
+describe("ISO8601 timestamp wire format", () => {
+  // Prevents: SQLite's default `YYYY-MM-DD HH:MM:SS` format leaking into
+  // JSON broadcasts. Swift's JSONDecoder.dateDecodingStrategy = .iso8601
+  // can't parse the SQLite shape and silently drops the entire enclosing
+  // message, which manifests as "no machines online" in the macOS app.
+  it("sqliteToIso8601 converts SQLite datetime format to ISO8601", () => {
+    assert.equal(
+      sqliteToIso8601("2026-04-07 10:56:55"),
+      "2026-04-07T10:56:55Z",
+    );
+  });
+
+  // Prevents: future schema migration to ISO-native breaking the converter
+  it("sqliteToIso8601 is idempotent for already-ISO8601 input", () => {
+    assert.equal(
+      sqliteToIso8601("2026-04-07T10:56:55Z"),
+      "2026-04-07T10:56:55Z",
+    );
+  });
+
+  it("sqliteToIso8601 passes through empty/null input", () => {
+    assert.equal(sqliteToIso8601(""), "");
+  });
+
+  // Prevents: regression where listMachinesForAccount emits SQLite format
+  it("listMachinesForAccount emits ISO8601 lastSeen", () => {
+    const account = db.createAccount("test@example.com", "hash");
+    db.createMachine(account.id, "Test Machine");
+    const machines = db.listMachinesForAccount(account.id);
+    assert.equal(machines.length, 1);
+    assert.match(machines[0].lastSeen, ISO8601_RE);
+  });
+
+  // Prevents: regression where listSessionsForAccount emits SQLite format
+  it("listSessionsForAccount emits ISO8601 lastActivity and createdAt", () => {
+    const account = db.createAccount("test@example.com", "hash");
+    const machine = db.createMachine(account.id, "Test");
+    db.createSession(account.id, machine.id, "/tmp", "idle");
+    const sessions = db.listSessionsForAccount(account.id);
+    assert.equal(sessions.length, 1);
+    assert.match(sessions[0].lastActivity, ISO8601_RE);
+    assert.match(sessions[0].createdAt, ISO8601_RE);
+  });
+
+  // Prevents: regression where getMachineByToken emits SQLite format
+  it("getMachineByToken emits ISO8601 lastSeen and createdAt", () => {
+    const account = db.createAccount("test@example.com", "hash");
+    const machine = db.createMachine(account.id, "Test");
+    const found = db.getMachineByToken(machine.registrationToken);
+    assert.ok(found);
+    assert.match(found.lastSeen, ISO8601_RE);
+    assert.match(found.createdAt, ISO8601_RE);
   });
 });

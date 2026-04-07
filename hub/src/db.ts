@@ -1,6 +1,10 @@
 import Database from "better-sqlite3";
 import { randomUUID } from "node:crypto";
-import type { SessionMeta, SessionStatus, MachineInfo } from "./protocol.ts";
+import type {
+  SessionMeta,
+  SessionStatus,
+  MachineInfo,
+} from "@cc-commander/protocol";
 
 export interface AccountRow {
   id: string;
@@ -152,7 +156,7 @@ export class HubDb {
       machineId: r.id,
       name: r.name,
       online: false,
-      lastSeen: r.last_seen,
+      lastSeen: sqliteToIso8601(r.last_seen),
     }));
   }
 
@@ -200,9 +204,9 @@ export class HubDb {
       machineId: r.machine_id,
       directory: r.directory,
       status: r.status,
-      lastActivity: r.last_activity,
+      lastActivity: sqliteToIso8601(r.last_activity),
       lastMessagePreview: r.last_message_preview,
-      createdAt: r.created_at,
+      createdAt: sqliteToIso8601(r.created_at),
     }));
   }
 
@@ -283,12 +287,29 @@ export class HubDb {
   }
 }
 
+/**
+ * SQLite's `datetime('now')` returns timestamps as `YYYY-MM-DD HH:MM:SS`
+ * (no T separator, no zone). Clients expect ISO8601 (`YYYY-MM-DDTHH:MM:SSZ`)
+ * because `JSONDecoder.dateDecodingStrategy = .iso8601` on Swift can't parse
+ * the SQLite shape and silently drops the entire enclosing message. Convert
+ * here so the SQLite format never leaks over the wire.
+ *
+ * Idempotent: if the input already looks ISO8601 it is returned unchanged,
+ * which lets the function tolerate future schema migrations that store
+ * timestamps in ISO format directly.
+ */
+export function sqliteToIso8601(s: string): string {
+  if (!s) return s;
+  if (s.includes("T")) return s; // already ISO8601
+  return s.replace(" ", "T") + "Z";
+}
+
 function toAccountRow(row: any): AccountRow {
   return {
     id: row.id,
     email: row.email,
     passwordHash: row.password_hash,
-    createdAt: row.created_at,
+    createdAt: sqliteToIso8601(row.created_at),
   };
 }
 
@@ -298,8 +319,8 @@ function toMachineRow(row: any): MachineRow {
     accountId: row.account_id,
     name: row.name,
     registrationToken: row.registration_token,
-    lastSeen: row.last_seen,
-    createdAt: row.created_at,
+    lastSeen: sqliteToIso8601(row.last_seen),
+    createdAt: sqliteToIso8601(row.created_at),
   };
 }
 
@@ -310,9 +331,9 @@ function toSessionRow(row: any): SessionRow {
     machineId: row.machine_id,
     directory: row.directory,
     status: row.status,
-    lastActivity: row.last_activity,
+    lastActivity: sqliteToIso8601(row.last_activity),
     lastMessagePreview: row.last_message_preview,
     sdkSessionId: row.sdk_session_id,
-    createdAt: row.created_at,
+    createdAt: sqliteToIso8601(row.created_at),
   };
 }

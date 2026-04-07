@@ -2,7 +2,8 @@
 # Install the cc-commander runner as a launchd agent on macOS.
 #
 # Prereqs:
-#   - You have run `npm install` in ../runner (so node_modules is populated).
+#   - You have run `npm install` in the repo root (workspaces hoist
+#     all deps to root node_modules; the runner has no local copy).
 #   - You have already run `node --experimental-strip-types ../src/cli.ts register ...`
 #     so that ~/.config/cc-commander/runner.json exists.
 #
@@ -12,6 +13,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RUNNER_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+REPO_ROOT="$(cd "$RUNNER_DIR/.." && pwd)"
 PLIST_LABEL="com.cc-commander.runner"
 TARGET_PLIST="$HOME/Library/LaunchAgents/$PLIST_LABEL.plist"
 TEMPLATE="$SCRIPT_DIR/$PLIST_LABEL.plist"
@@ -30,8 +32,8 @@ if [[ -z "$NODE_BIN" ]]; then
     exit 1
 fi
 
-if [[ ! -d "$RUNNER_DIR/node_modules" ]]; then
-    echo "ERROR: $RUNNER_DIR/node_modules missing. Run \`npm install\` in the runner dir first." >&2
+if [[ ! -d "$REPO_ROOT/node_modules" ]]; then
+    echo "ERROR: $REPO_ROOT/node_modules missing. Run \`npm install\` in the repo root first." >&2
     exit 1
 fi
 
