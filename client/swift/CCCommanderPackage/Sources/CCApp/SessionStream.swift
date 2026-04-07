@@ -35,6 +35,13 @@ public final class SessionStream {
     public let sessionId: String
     public var entries: [SessionEntry] = []
 
+    /// Hard cap on `entries`. When exceeded, oldest entries are dropped to
+    /// keep memory bounded on long-running sessions. The hub does not store
+    /// conversation history per spec, so the only place a long session
+    /// lives is in this array -- without a cap, marathon sessions would
+    /// eventually OOM the client (especially on iOS).
+    public static let maxEntries: Int = 500
+
     /// Live, in-progress assistant text from the current `stream_text` deltas.
     /// Read by a dedicated sub-view so per-token mutation does not invalidate
     /// the parent ForEach over `entries`.
@@ -62,7 +69,7 @@ public final class SessionStream {
 
     public func addToolCall(toolCallId: String, toolName: String, display: String) {
         flushPendingText()
-        entries.append(.toolCall(
+        appendEntry(.toolCall(
             id: UUID().uuidString,
             toolCallId: toolCallId,
             toolName: toolName,
@@ -90,12 +97,12 @@ public final class SessionStream {
 
     public func clearPendingPrompt(summary: String) {
         pendingPrompt = nil
-        entries.append(.userPromptResponse(id: UUID().uuidString, summary: summary))
+        appendEntry(.userPromptResponse(id: UUID().uuidString, summary: summary))
     }
 
     public func addError(_ message: String) {
         flushPendingText()
-        entries.append(.error(id: UUID().uuidString, message: message))
+        appendEntry(.error(id: UUID().uuidString, message: message))
     }
 
     public func flushTurn() {
@@ -114,9 +121,9 @@ public final class SessionStream {
             if case .string(let text) = content {
                 let id = UUID().uuidString
                 if role == "user" {
-                    entries.append(.userMessage(id: id, text: text))
+                    appendEntry(.userMessage(id: id, text: text))
                 } else if role == "assistant" && !text.isEmpty {
-                    entries.append(.assistantText(id: id, text: text))
+                    appendEntry(.assistantText(id: id, text: text))
                 }
                 continue
             }
@@ -130,14 +137,14 @@ public final class SessionStream {
                 switch type {
                 case "text":
                     if role == "assistant", case .string(let text) = bl["text"], !text.isEmpty {
-                        entries.append(.assistantText(id: UUID().uuidString, text: text))
+                        appendEntry(.assistantText(id: UUID().uuidString, text: text))
                     } else if role == "user", case .string(let text) = bl["text"] {
-                        entries.append(.userMessage(id: UUID().uuidString, text: text))
+                        appendEntry(.userMessage(id: UUID().uuidString, text: text))
                     }
                 case "tool_use":
                     guard case .string(let toolCallId) = bl["id"],
                           case .string(let toolName) = bl["name"] else { continue }
-                    entries.append(.toolCall(
+                    appendEntry(.toolCall(
                         id: UUID().uuidString,
                         toolCallId: toolCallId,
                         toolName: toolName,
@@ -155,7 +162,7 @@ public final class SessionStream {
                     } else {
                         // Orphan tool_result (tool_use missing from history window).
                         // Render as a standalone toolCall so the result is still visible.
-                        entries.append(.toolCall(
+                        appendEntry(.toolCall(
                             id: UUID().uuidString,
                             toolCallId: toolUseId,
                             toolName: "(unknown tool)",
@@ -205,7 +212,19 @@ public final class SessionStream {
 
     private func flushPendingText() {
         guard !pendingText.isEmpty else { return }
-        entries.append(.assistantText(id: UUID().uuidString, text: pendingText))
+        appendEntry(.assistantText(id: UUID().uuidString, text: pendingText))
         pendingText = ""
+    }
+
+    /// Append `entry` to `entries`, evicting the oldest entries if the cap
+    /// is exceeded. Adjusts `currentTurnStartIndex` so it still points at
+    /// the same logical entry (or 0 if that entry was evicted).
+    private func appendEntry(_ entry: SessionEntry) {
+        entries.append(entry)
+        let overflow = entries.count - Self.maxEntries
+        if overflow > 0 {
+            entries.removeFirst(overflow)
+            currentTurnStartIndex = max(0, currentTurnStartIndex - overflow)
+        }
     }
 }
