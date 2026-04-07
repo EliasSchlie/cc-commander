@@ -135,12 +135,9 @@ public final class SessionStream {
     }
 
     public func loadHistory(_ messages: [AnyCodable], error: String? = nil) {
-        // History may arrive after live events (optimistic user messages
-        // or stream deltas) already populated `entries`. Replaying would
-        // duplicate and reorder them, so drop the historical messages --
-        // but still surface a `historyUnavailable` marker if the reply
-        // carried an error, since the user should see degraded state
-        // even when some live events arrived first.
+        // Late history reply: live events already populated entries, so
+        // replaying would duplicate and reorder. Drop the messages but
+        // still surface a degraded-state marker on the error path.
         guard entries.isEmpty else {
             if let code = error {
                 appendEntry(.historyUnavailable(id: UUID().uuidString, code: code))
