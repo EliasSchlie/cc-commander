@@ -2,39 +2,39 @@ import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { WebSocket, WebSocketServer } from "ws";
 import { createServer } from "node:http";
-import { MachineAgent } from "../agent.ts";
-import type { HubToAgentMsg, AgentToHubMsg } from "../protocol.ts";
+import { MachineRunner } from "../runner.ts";
+import type { HubToRunnerMsg, RunnerToHubMsg } from "../protocol.ts";
 
 let mockHub: ReturnType<typeof createServer>;
 let wss: WebSocketServer;
 let hubPort: number;
-let agentSocket: WebSocket | null;
+let runnerSocket: WebSocket | null;
 
-function waitForAgentMsg(
+function waitForRunnerMsg(
   predicate?: (m: any) => boolean,
   timeoutMs = 3000,
 ): Promise<any> {
   return new Promise((resolve, reject) => {
-    if (!agentSocket) return reject(new Error("No agent connected"));
+    if (!runnerSocket) return reject(new Error("No runner connected"));
     const timer = setTimeout(() => {
-      agentSocket!.off("message", handler);
+      runnerSocket!.off("message", handler);
       reject(new Error("Timeout"));
     }, timeoutMs);
     const handler = (data: Buffer) => {
       const msg = JSON.parse(data.toString());
       if (!predicate || predicate(msg)) {
         clearTimeout(timer);
-        agentSocket!.off("message", handler);
+        runnerSocket!.off("message", handler);
         resolve(msg);
       }
     };
-    agentSocket.on("message", handler);
+    runnerSocket.on("message", handler);
   });
 }
 
-function sendToAgent(msg: HubToAgentMsg): void {
-  if (agentSocket && agentSocket.readyState === WebSocket.OPEN)
-    agentSocket.send(JSON.stringify(msg));
+function sendToRunner(msg: HubToRunnerMsg): void {
+  if (runnerSocket && runnerSocket.readyState === WebSocket.OPEN)
+    runnerSocket.send(JSON.stringify(msg));
 }
 
 function mockQuery(messages: any[]) {
@@ -93,16 +93,16 @@ function mockQueryWithQuestion(question: string) {
 }
 
 beforeEach(async () => {
-  agentSocket = null;
+  runnerSocket = null;
   mockHub = createServer();
   wss = new WebSocketServer({ server: mockHub });
   wss.on("connection", (ws, req) => {
     const url = new URL(req.url || "/", "http://localhost");
     if (
-      url.pathname === "/ws/agent" &&
+      url.pathname === "/ws/runner" &&
       url.searchParams.get("token") === "test-token"
     ) {
-      agentSocket = ws;
+      runnerSocket = ws;
     } else {
       ws.close(4001, "Unauthorized");
     }
@@ -125,39 +125,39 @@ afterEach(async () => {
 });
 
 describe("connection", () => {
-  // Prevents: agent failing to connect or not sending hello
-  it("connects and sends agent_hello", async () => {
-    const agent = new MachineAgent({
+  // Prevents: runner failing to connect or not sending hello
+  it("connects and sends runner_hello", async () => {
+    const runner = new MachineRunner({
       hubUrl: `ws://localhost:${hubPort}`,
       registrationToken: "test-token",
       machineName: "Test Machine",
     });
-    await agent.connect();
-    const msg = await waitForAgentMsg();
-    assert.equal(msg.type, "agent_hello");
+    await runner.connect();
+    const msg = await waitForRunnerMsg();
+    assert.equal(msg.type, "runner_hello");
     assert.equal(msg.machineName, "Test Machine");
-    agent.disconnect();
+    runner.disconnect();
   });
 });
 
 describe("session lifecycle", () => {
-  // Prevents: agent not streaming SDK events to hub
+  // Prevents: runner not streaming SDK events to hub
   it("streams text from SDK to hub", async () => {
-    const agent = new MachineAgent({
+    const runner = new MachineRunner({
       hubUrl: `ws://localhost:${hubPort}`,
       registrationToken: "test-token",
       machineName: "Test",
       queryFn: mockQueryWithResult("Hello world!"),
     });
-    await agent.connect();
-    await waitForAgentMsg((m) => m.type === "agent_hello");
+    await runner.connect();
+    await waitForRunnerMsg((m) => m.type === "runner_hello");
 
     const allMsgs: any[] = [];
-    agentSocket!.on("message", (data) => {
+    runnerSocket!.on("message", (data) => {
       allMsgs.push(JSON.parse(data.toString()));
     });
 
-    sendToAgent({
+    sendToRunner({
       type: "hub_start_session",
       sessionId: "s1",
       directory: "/tmp",
@@ -179,12 +179,12 @@ describe("session lifecycle", () => {
     assert.ok(done, "Expected session_done");
     assert.equal(done.sdkSessionId, "sdk-session-1");
 
-    agent.disconnect();
+    runner.disconnect();
   });
 
   // Prevents: tool calls not being relayed
   it("relays tool calls to hub", async () => {
-    const agent = new MachineAgent({
+    const runner = new MachineRunner({
       hubUrl: `ws://localhost:${hubPort}`,
       registrationToken: "test-token",
       machineName: "Test",
@@ -204,15 +204,15 @@ describe("session lifecycle", () => {
         { type: "result", session_id: "sdk-2", num_turns: 1, duration_ms: 200 },
       ]),
     });
-    await agent.connect();
-    await waitForAgentMsg((m) => m.type === "agent_hello");
+    await runner.connect();
+    await waitForRunnerMsg((m) => m.type === "runner_hello");
 
     const allMsgs: any[] = [];
-    agentSocket!.on("message", (data) => {
+    runnerSocket!.on("message", (data) => {
       allMsgs.push(JSON.parse(data.toString()));
     });
 
-    sendToAgent({
+    sendToRunner({
       type: "hub_start_session",
       sessionId: "s2",
       directory: "/tmp",
@@ -225,26 +225,26 @@ describe("session lifecycle", () => {
     assert.equal(toolCall.display, "$ ls -la");
     assert.ok(allMsgs.find((m) => m.type === "tool_result"));
 
-    agent.disconnect();
+    runner.disconnect();
   });
 
   // Prevents: AskUserQuestion not being relayed, or answers not reaching SDK
   it("relays AskUserQuestion and resolves with answer", async () => {
-    const agent = new MachineAgent({
+    const runner = new MachineRunner({
       hubUrl: `ws://localhost:${hubPort}`,
       registrationToken: "test-token",
       machineName: "Test",
       queryFn: mockQueryWithQuestion("Continue?"),
     });
-    await agent.connect();
-    await waitForAgentMsg((m) => m.type === "agent_hello");
+    await runner.connect();
+    await waitForRunnerMsg((m) => m.type === "runner_hello");
 
     const allMsgs: any[] = [];
-    agentSocket!.on("message", (data) => {
+    runnerSocket!.on("message", (data) => {
       allMsgs.push(JSON.parse(data.toString()));
     });
 
-    sendToAgent({
+    sendToRunner({
       type: "hub_start_session",
       sessionId: "s3",
       directory: "/tmp",
@@ -261,7 +261,7 @@ describe("session lifecycle", () => {
       ),
     );
 
-    sendToAgent({
+    sendToRunner({
       type: "hub_respond_to_prompt",
       sessionId: "s3",
       promptId: promptMsg.promptId,
@@ -273,7 +273,7 @@ describe("session lifecycle", () => {
       allMsgs.find((m) => m.type === "session_done"),
       "Expected session_done after answer",
     );
-    agent.disconnect();
+    runner.disconnect();
   });
 });
 
@@ -286,23 +286,23 @@ describe("session history", () => {
       return [];
     };
 
-    const agent = new MachineAgent({
+    const runner = new MachineRunner({
       hubUrl: `ws://localhost:${hubPort}`,
       registrationToken: "test-token",
       machineName: "Test",
       queryFn: mockQueryWithResult("Hello!", "sdk-session-1"),
       getSessionMessagesFn: mockGetMessages as any,
     });
-    await agent.connect();
-    await waitForAgentMsg((m) => m.type === "agent_hello");
+    await runner.connect();
+    await waitForRunnerMsg((m) => m.type === "runner_hello");
 
     // Start and complete a session
     const allMsgs: any[] = [];
-    agentSocket!.on("message", (data) => {
+    runnerSocket!.on("message", (data) => {
       allMsgs.push(JSON.parse(data.toString()));
     });
 
-    sendToAgent({
+    sendToRunner({
       type: "hub_start_session",
       sessionId: "s1",
       directory: "/tmp",
@@ -316,7 +316,7 @@ describe("session history", () => {
 
     // Now request history for the completed session
     allMsgs.length = 0;
-    sendToAgent({
+    sendToRunner({
       type: "hub_get_history",
       sessionId: "s1",
       requestId: "req-1",
@@ -332,49 +332,49 @@ describe("session history", () => {
       "Should have 1 message from completed session",
     );
 
-    agent.disconnect();
+    runner.disconnect();
   });
 
   // Prevents: history request for unknown session crashing
   it("returns empty history for unknown session", async () => {
-    const agent = new MachineAgent({
+    const runner = new MachineRunner({
       hubUrl: `ws://localhost:${hubPort}`,
       registrationToken: "test-token",
       machineName: "Test",
     });
-    await agent.connect();
-    await waitForAgentMsg((m) => m.type === "agent_hello");
+    await runner.connect();
+    await waitForRunnerMsg((m) => m.type === "runner_hello");
 
-    sendToAgent({
+    sendToRunner({
       type: "hub_get_history",
       sessionId: "nonexistent",
       requestId: "req-1",
     });
-    const msg = await waitForAgentMsg((m) => m.type === "session_history");
+    const msg = await waitForRunnerMsg((m) => m.type === "session_history");
     assert.equal(msg.requestId, "req-1");
     assert.deepEqual(msg.messages, []);
 
-    agent.disconnect();
+    runner.disconnect();
   });
 });
 
 describe("protocol validation", () => {
-  // Prevents: unknown message types crashing the agent
+  // Prevents: unknown message types crashing the runner
   it("ignores unknown message types", async () => {
-    const agent = new MachineAgent({
+    const runner = new MachineRunner({
       hubUrl: `ws://localhost:${hubPort}`,
       registrationToken: "test-token",
       machineName: "Test",
     });
-    await agent.connect();
-    await waitForAgentMsg((m) => m.type === "agent_hello");
+    await runner.connect();
+    await waitForRunnerMsg((m) => m.type === "runner_hello");
 
     // Send unknown message type -- should not crash
-    agentSocket!.send(JSON.stringify({ type: "unknown_type", data: "test" }));
+    runnerSocket!.send(JSON.stringify({ type: "unknown_type", data: "test" }));
     await new Promise((r) => setTimeout(r, 100));
 
-    // Agent should still be connected
-    assert.equal(agent.ws?.readyState, WebSocket.OPEN);
-    agent.disconnect();
+    // Runner should still be connected
+    assert.equal(runner.ws?.readyState, WebSocket.OPEN);
+    runner.disconnect();
   });
 });

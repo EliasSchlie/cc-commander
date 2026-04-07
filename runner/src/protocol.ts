@@ -1,6 +1,6 @@
 /**
- * Wire protocol types for the agent.
- * Defines messages the agent sends to and receives from the hub.
+ * Wire protocol types for the runner.
+ * Defines messages the runner sends to and receives from the hub.
  * Must stay compatible with the hub's protocol definition.
  */
 
@@ -11,7 +11,7 @@ export type UserPromptResponse =
   | { kind: "allow"; updatedInput?: Record<string, unknown> }
   | { kind: "deny"; message?: string };
 
-// ── Messages: Hub -> Agent ──────────────────────────────────────────────
+// ── Messages: Hub -> Runner ──────────────────────────────────────────────
 
 export interface HubStartSessionMsg {
   type: "hub_start_session";
@@ -39,13 +39,13 @@ export interface HubGetHistoryMsg {
   requestId: string;
 }
 
-export type HubToAgentMsg =
+export type HubToRunnerMsg =
   | HubStartSessionMsg
   | HubSendPromptMsg
   | HubRespondToPromptMsg
   | HubGetHistoryMsg;
 
-// ── Messages: Agent -> Hub ──────────────────────────────────────────────
+// ── Messages: Runner -> Hub ──────────────────────────────────────────────
 
 export interface StreamTextMsg {
   type: "stream_text";
@@ -104,12 +104,12 @@ export interface SessionHistoryMsg {
   requestId: string;
   messages: unknown[];
 }
-export interface AgentHelloMsg {
-  type: "agent_hello";
+export interface RunnerHelloMsg {
+  type: "runner_hello";
   machineName: string;
 }
 
-export type AgentToHubMsg =
+export type RunnerToHubMsg =
   | StreamTextMsg
   | ToolCallMsg
   | ToolResultMsg
@@ -118,7 +118,7 @@ export type AgentToHubMsg =
   | SessionDoneMsg
   | SessionErrorMsg
   | SessionHistoryMsg
-  | AgentHelloMsg;
+  | RunnerHelloMsg;
 
 // ── Parsing ─────────────────────────────────────────────────────────────
 
@@ -129,7 +129,7 @@ const HUB_MSG_TYPES = new Set([
   "hub_get_history",
 ]);
 
-export function parseHubMessage(data: string): HubToAgentMsg {
+export function parseHubMessage(data: string): HubToRunnerMsg {
   const msg = JSON.parse(data);
   if (typeof msg !== "object" || msg === null || typeof msg.type !== "string") {
     throw new Error("Invalid message: missing type field");
@@ -137,7 +137,7 @@ export function parseHubMessage(data: string): HubToAgentMsg {
   if (!HUB_MSG_TYPES.has(msg.type)) {
     throw new Error(`Unknown hub message type: ${msg.type}`);
   }
-  return msg as HubToAgentMsg;
+  return msg as HubToRunnerMsg;
 }
 
 export function serialize(msg: { type: string }): string {

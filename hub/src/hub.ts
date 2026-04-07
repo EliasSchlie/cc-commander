@@ -4,13 +4,13 @@ import { URL } from "node:url";
 import { randomUUID } from "node:crypto";
 import {
   parseClientMessage,
-  parseAgentMessage,
+  parseRunnerMessage,
   serialize,
 } from "./protocol.ts";
 import type {
   ClientToHubMsg,
-  AgentToHubMsg,
-  HubToAgentMsg,
+  RunnerToHubMsg,
+  HubToRunnerMsg,
   HubToClientMsg,
   RespondToPromptMsg,
 } from "./protocol.ts";
@@ -24,7 +24,7 @@ interface ClientConnection {
   email: string;
 }
 
-interface AgentConnection {
+interface RunnerConnection {
   ws: WebSocket;
   machineId: string;
   accountId: string;
@@ -40,7 +40,7 @@ export interface HubConfig {
 export class Hub {
   config: HubConfig;
   clients: Map<string, ClientConnection>;
-  agents: Map<string, AgentConnection>;
+  runners: Map<string, RunnerConnection>;
   /** Maps requestId -> ClientConnection for pending history requests */
   pendingHistoryRequests: Map<string, ClientConnection>;
   httpServer: ReturnType<typeof createServer>;
@@ -49,7 +49,7 @@ export class Hub {
   constructor(config: HubConfig) {
     this.config = config;
     this.clients = new Map();
-    this.agents = new Map();
+    this.runners = new Map();
     this.pendingHistoryRequests = new Map();
 
     this.httpServer = createServer((req, res) => this.handleHttp(req, res));
@@ -66,7 +66,7 @@ export class Hub {
   stop(): Promise<void> {
     return new Promise((resolve, reject) => {
       for (const [, conn] of this.clients) conn.ws.close();
-      for (const [, conn] of this.agents) conn.ws.close();
+      for (const [, conn] of this.runners) conn.ws.close();
       this.wss.close(() => {
         this.httpServer.close((err) => (err ? reject(err) : resolve()));
       });
@@ -156,8 +156,8 @@ export class Hub {
 
     if (url.pathname === "/ws/client") {
       this.handleClientConnection(ws, url, req);
-    } else if (url.pathname === "/ws/agent") {
-      this.handleAgentConnection(ws, url);
+    } else if (url.pathname === "/ws/runner") {
+      this.handleRunnerConnection(ws, url);
     } else {
       ws.close(4000, "Unknown endpoint");
     }
@@ -261,12 +261,12 @@ export class Hub {
     conn: ClientConnection,
     msg: { machineId: string; directory: string; prompt: string },
   ): void {
-    const agentConn = this.agents.get(msg.machineId);
-    if (!agentConn) {
+    const runnerConn = this.runners.get(msg.machineId);
+    if (!runnerConn) {
       this.sendToClient(conn, { type: "error", message: "Machine is offline" });
       return;
     }
-    if (agentConn.accountId !== conn.accountId) {
+    if (runnerConn.accountId !== conn.accountId) {
       this.sendToClient(conn, { type: "error", message: "Machine not found" });
       return;
     }
@@ -278,7 +278,7 @@ export class Hub {
       "running",
     );
 
-    this.sendToAgent(agentConn, {
+    this.sendToRunner(runnerConn, {
       type: "hub_start_session",
       sessionId: session.id,
       directory: msg.directory,
@@ -292,10 +292,10 @@ export class Hub {
     conn: ClientConnection,
     msg: { sessionId: string; prompt: string },
   ): void {
-    const result = this.resolveSessionAgent(conn, msg.sessionId);
+    const result = this.resolveSessionRunner(conn, msg.sessionId);
     if (!result) return;
     this.config.db.updateSessionStatus(result.session.id, "running");
-    this.sendToAgent(result.agentConn, {
+    this.sendToRunner(result.runnerConn, {
       type: "hub_send_prompt",
       sessionId: msg.sessionId,
       prompt: msg.prompt,
@@ -306,9 +306,9 @@ export class Hub {
     conn: ClientConnection,
     msg: RespondToPromptMsg,
   ): void {
-    const result = this.resolveSessionAgent(conn, msg.sessionId);
+    const result = this.resolveSessionRunner(conn, msg.sessionId);
     if (!result) return;
-    this.sendToAgent(result.agentConn, {
+    this.sendToRunner(result.runnerConn, {
       type: "hub_respond_to_prompt",
       sessionId: msg.sessionId,
       promptId: msg.promptId,
@@ -320,41 +320,41 @@ export class Hub {
     conn: ClientConnection,
     msg: { sessionId: string },
   ): void {
-    const result = this.resolveSessionAgent(conn, msg.sessionId);
+    const result = this.resolveSessionRunner(conn, msg.sessionId);
     if (!result) return;
     const requestId = randomUUID();
     this.pendingHistoryRequests.set(requestId, conn);
-    this.sendToAgent(result.agentConn, {
+    this.sendToRunner(result.runnerConn, {
       type: "hub_get_history",
       sessionId: msg.sessionId,
       requestId,
     });
   }
 
-  /** Look up session + verify ownership + find online agent. Sends error to client and returns null on failure. */
-  private resolveSessionAgent(
+  /** Look up session + verify ownership + find online runner. Sends error to client and returns null on failure. */
+  private resolveSessionRunner(
     conn: ClientConnection,
     sessionId: string,
   ): {
     session: import("./db.ts").SessionRow;
-    agentConn: AgentConnection;
+    runnerConn: RunnerConnection;
   } | null {
     const session = this.config.db.getSessionById(sessionId);
     if (!session || session.accountId !== conn.accountId) {
       this.sendToClient(conn, { type: "error", message: "Session not found" });
       return null;
     }
-    const agentConn = this.agents.get(session.machineId);
-    if (!agentConn) {
+    const runnerConn = this.runners.get(session.machineId);
+    if (!runnerConn) {
       this.sendToClient(conn, { type: "error", message: "Machine is offline" });
       return null;
     }
-    return { session, agentConn };
+    return { session, runnerConn };
   }
 
-  // ── Agent connections ─────────────────────────────────────────────────
+  // ── Runner connections ─────────────────────────────────────────────────
 
-  private handleAgentConnection(ws: WebSocket, url: URL): void {
+  private handleRunnerConnection(ws: WebSocket, url: URL): void {
     const token = url.searchParams.get("token");
     if (!token) {
       ws.close(4001, "Missing registration token");
@@ -366,41 +366,44 @@ export class Hub {
       return;
     }
 
-    const existing = this.agents.get(machine.id);
+    const existing = this.runners.get(machine.id);
     if (existing) {
       existing.ws.close(4002, "Replaced by new connection");
     }
 
-    const conn: AgentConnection = {
+    const conn: RunnerConnection = {
       ws,
       machineId: machine.id,
       accountId: machine.accountId,
       machineName: machine.name,
     };
-    this.agents.set(machine.id, conn);
+    this.runners.set(machine.id, conn);
     this.config.db.updateMachineLastSeen(machine.id);
     this.broadcastMachineList(machine.accountId);
 
     ws.on("message", (data) => {
       try {
-        const msg = parseAgentMessage(data.toString());
-        this.handleAgentMessage(conn, msg);
+        const msg = parseRunnerMessage(data.toString());
+        this.handleRunnerMessage(conn, msg);
       } catch (err) {
-        console.error("Invalid agent message:", err);
+        console.error("Invalid runner message:", err);
       }
     });
 
     ws.on("close", () => {
-      if (this.agents.get(machine.id)?.ws === ws) {
-        this.agents.delete(machine.id);
+      if (this.runners.get(machine.id)?.ws === ws) {
+        this.runners.delete(machine.id);
         this.broadcastMachineList(machine.accountId);
       }
     });
   }
 
-  private handleAgentMessage(conn: AgentConnection, msg: AgentToHubMsg): void {
+  private handleRunnerMessage(
+    conn: RunnerConnection,
+    msg: RunnerToHubMsg,
+  ): void {
     switch (msg.type) {
-      case "agent_hello":
+      case "runner_hello":
         conn.machineName = msg.machineName;
         break;
 
@@ -456,7 +459,7 @@ export class Hub {
     }
   }
 
-  private sendToAgent(conn: AgentConnection, msg: HubToAgentMsg): void {
+  private sendToRunner(conn: RunnerConnection, msg: HubToRunnerMsg): void {
     if (conn.ws.readyState === WebSocket.OPEN) {
       conn.ws.send(serialize(msg));
     }
@@ -486,7 +489,7 @@ export class Hub {
     accountId: string,
   ): import("./protocol.ts").MachineInfo[] {
     const machines = this.config.db.listMachinesForAccount(accountId);
-    for (const m of machines) m.online = this.agents.has(m.machineId);
+    for (const m of machines) m.online = this.runners.has(m.machineId);
     return machines;
   }
 }

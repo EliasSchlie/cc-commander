@@ -2,7 +2,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
   parseClientMessage,
-  parseAgentMessage,
+  parseRunnerMessage,
   serialize,
 } from "../protocol.ts";
 
@@ -50,19 +50,19 @@ describe("parseClientMessage", () => {
   });
 });
 
-describe("parseAgentMessage", () => {
-  // Prevents: agent messages with missing fields passing through
-  it("validates agent message fields", () => {
-    const msg = parseAgentMessage(
+describe("parseRunnerMessage", () => {
+  // Prevents: runner messages with missing fields passing through
+  it("validates runner message fields", () => {
+    const msg = parseRunnerMessage(
       '{"type":"stream_text","sessionId":"s1","content":"hello"}',
     );
     assert.equal(msg.type, "stream_text");
   });
 
-  // Prevents: agent_hello without machineName being accepted
-  it("rejects agent_hello without machineName", () => {
+  // Prevents: runner_hello without machineName being accepted
+  it("rejects runner_hello without machineName", () => {
     assert.throws(
-      () => parseAgentMessage('{"type":"agent_hello"}'),
+      () => parseRunnerMessage('{"type":"runner_hello"}'),
       /Missing required field: machineName/,
     );
   });
@@ -70,7 +70,7 @@ describe("parseAgentMessage", () => {
   // Prevents: session_done without sdkSessionId being accepted
   it("rejects session_done without sdkSessionId", () => {
     assert.throws(
-      () => parseAgentMessage('{"type":"session_done","sessionId":"s1"}'),
+      () => parseRunnerMessage('{"type":"session_done","sessionId":"s1"}'),
       /Missing required field: sdkSessionId/,
     );
   });

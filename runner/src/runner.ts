@@ -2,8 +2,8 @@ import { WebSocket } from "ws";
 import { query, getSessionMessages } from "@anthropic-ai/claude-agent-sdk";
 import { parseHubMessage, serialize } from "./protocol.ts";
 import type {
-  HubToAgentMsg,
-  AgentToHubMsg,
+  HubToRunnerMsg,
+  RunnerToHubMsg,
   UserPromptResponse,
 } from "./protocol.ts";
 
@@ -20,7 +20,7 @@ interface ActiveSession {
 export type QueryFn = typeof query;
 export type GetSessionMessagesFn = typeof getSessionMessages;
 
-export interface AgentConfig {
+export interface RunnerConfig {
   hubUrl: string;
   registrationToken: string;
   machineName: string;
@@ -29,8 +29,8 @@ export interface AgentConfig {
   getSessionMessagesFn?: GetSessionMessagesFn;
 }
 
-export class MachineAgent {
-  config: AgentConfig;
+export class MachineRunner {
+  config: RunnerConfig;
   ws: WebSocket | null;
   sessions: Map<string, ActiveSession>;
   sdkSessionIds: Map<string, string>;
@@ -39,7 +39,7 @@ export class MachineAgent {
   queryFn: QueryFn;
   getSessionMessagesFn: GetSessionMessagesFn;
 
-  constructor(config: AgentConfig) {
+  constructor(config: RunnerConfig) {
     this.config = config;
     this.ws = null;
     this.sessions = new Map();
@@ -53,15 +53,15 @@ export class MachineAgent {
 
   connect(): Promise<void> {
     return new Promise((resolve, reject) => {
-      const url = `${this.config.hubUrl}/ws/agent?token=${this.config.registrationToken}`;
+      const url = `${this.config.hubUrl}/ws/runner?token=${this.config.registrationToken}`;
       this.ws = new WebSocket(url);
       let connected = false;
 
       this.ws.on("open", () => {
         connected = true;
-        console.log(`[agent] Connected to hub as "${this.config.machineName}"`);
+        console.log(`[runner] Connected to hub as "${this.config.machineName}"`);
         this.sendToHub({
-          type: "agent_hello",
+          type: "runner_hello",
           machineName: this.config.machineName,
         });
         resolve();
@@ -72,15 +72,15 @@ export class MachineAgent {
           const msg = parseHubMessage(data.toString());
           this.handleMessage(msg);
         } catch (err) {
-          console.error("[agent] Invalid message from hub:", err);
+          console.error("[runner] Invalid message from hub:", err);
         }
       });
 
       this.ws.on("close", () => {
-        console.log("[agent] Disconnected from hub");
+        console.log("[runner] Disconnected from hub");
         if (connected && this.shouldReconnect) {
           const delay = this.config.reconnectIntervalMs ?? 5000;
-          console.log(`[agent] Reconnecting in ${delay}ms...`);
+          console.log(`[runner] Reconnecting in ${delay}ms...`);
           this.reconnectTimer = setTimeout(() => {
             this.connect().catch(console.error);
           }, delay);
@@ -88,7 +88,7 @@ export class MachineAgent {
       });
 
       this.ws.on("error", (err) => {
-        console.error("[agent] WebSocket error:", err.message);
+        console.error("[runner] WebSocket error:", err.message);
         if (!connected) reject(err);
       });
     });
@@ -104,7 +104,7 @@ export class MachineAgent {
       session.abortController.abort();
       // Reject any pending prompt promises so canUseTool doesn't hang
       for (const [, resolver] of session.pendingPrompts) {
-        resolver({ kind: "deny", message: "Agent disconnected" });
+        resolver({ kind: "deny", message: "Runner disconnected" });
       }
       session.pendingPrompts.clear();
     }
@@ -115,13 +115,13 @@ export class MachineAgent {
     }
   }
 
-  private sendToHub(msg: AgentToHubMsg): void {
+  private sendToHub(msg: RunnerToHubMsg): void {
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       this.ws.send(serialize(msg));
     }
   }
 
-  private handleMessage(msg: HubToAgentMsg): void {
+  private handleMessage(msg: HubToRunnerMsg): void {
     switch (msg.type) {
       case "hub_start_session":
         this.runSession(msg.sessionId, msg.prompt, { cwd: msg.directory });

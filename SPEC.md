@@ -12,7 +12,7 @@ Sessions run on the machines where your code lives. CC Commander is the remote c
 
 A **client** is something you use to interact with sessions -- your phone, your laptop, a browser tab. It runs the CC Commander app. You can't run Claude Code sessions on a client (unless it's also registered as a machine).
 
-A **machine** is something you run Claude Code sessions on -- a VPS, a Mac Mini, your MacBook. It runs the CC Commander agent. You register it once by running a command. It doesn't need the app installed.
+A **machine** is something you run Claude Code sessions on -- a VPS, a Mac Mini, your MacBook. It runs the CC Commander runner. You register it once by running a command. It doesn't need the app installed.
 
 A MacBook might be both: it has the app (client) and can run sessions (machine). A phone might only be a client. A VPS might only be a machine.
 

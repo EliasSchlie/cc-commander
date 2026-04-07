@@ -1,7 +1,7 @@
 /**
  * WebSocket message protocol for the hub.
  * Defines all messages the hub sends and receives.
- * The hub is the authority on this protocol -- agent and client must conform.
+ * The hub is the authority on this protocol -- runner and client must conform.
  */
 
 // ── Session status ──────────────────────────────────────────────────────
@@ -78,7 +78,7 @@ export type ClientToHubMsg =
   | GetSessionHistoryMsg
   | ListMachinesMsg;
 
-// ── Messages: Hub -> Agent ──────────────────────────────────────────────
+// ── Messages: Hub -> Runner ──────────────────────────────────────────────
 
 export interface HubStartSessionMsg {
   type: "hub_start_session";
@@ -106,13 +106,13 @@ export interface HubGetHistoryMsg {
   requestId: string;
 }
 
-export type HubToAgentMsg =
+export type HubToRunnerMsg =
   | HubStartSessionMsg
   | HubSendPromptMsg
   | HubRespondToPromptMsg
   | HubGetHistoryMsg;
 
-// ── Messages: Agent -> Hub ──────────────────────────────────────────────
+// ── Messages: Runner -> Hub ──────────────────────────────────────────────
 
 export interface StreamTextMsg {
   type: "stream_text";
@@ -177,12 +177,12 @@ export interface SessionHistoryMsg {
   messages: unknown[];
 }
 
-export interface AgentHelloMsg {
-  type: "agent_hello";
+export interface RunnerHelloMsg {
+  type: "runner_hello";
   machineName: string;
 }
 
-export type AgentToHubMsg =
+export type RunnerToHubMsg =
   | StreamTextMsg
   | ToolCallMsg
   | ToolResultMsg
@@ -191,7 +191,7 @@ export type AgentToHubMsg =
   | SessionDoneMsg
   | SessionErrorMsg
   | SessionHistoryMsg
-  | AgentHelloMsg;
+  | RunnerHelloMsg;
 
 // ── Messages: Hub -> Client ─────────────────────────────────────────────
 
@@ -234,7 +234,7 @@ const CLIENT_MSG_REQUIRED_FIELDS: Record<string, string[]> = {
   list_machines: [],
 };
 
-const AGENT_MSG_REQUIRED_FIELDS: Record<string, string[]> = {
+const RUNNER_MSG_REQUIRED_FIELDS: Record<string, string[]> = {
   stream_text: ["sessionId", "content"],
   tool_call: ["sessionId", "toolName", "display"],
   tool_result: ["sessionId", "content"],
@@ -243,7 +243,7 @@ const AGENT_MSG_REQUIRED_FIELDS: Record<string, string[]> = {
   session_done: ["sessionId", "sdkSessionId"],
   session_error: ["sessionId", "error"],
   session_history: ["sessionId", "requestId", "messages"],
-  agent_hello: ["machineName"],
+  runner_hello: ["machineName"],
 };
 
 class MessageValidationError extends Error {
@@ -279,17 +279,19 @@ export function parseClientMessage(data: string): ClientToHubMsg {
   return msg as ClientToHubMsg;
 }
 
-export function parseAgentMessage(data: string): AgentToHubMsg {
+export function parseRunnerMessage(data: string): RunnerToHubMsg {
   const msg = JSON.parse(data);
   if (typeof msg !== "object" || msg === null || typeof msg.type !== "string") {
     throw new MessageValidationError("Invalid message: missing type field");
   }
-  const fields = AGENT_MSG_REQUIRED_FIELDS[msg.type];
+  const fields = RUNNER_MSG_REQUIRED_FIELDS[msg.type];
   if (!fields) {
-    throw new MessageValidationError(`Unknown agent message type: ${msg.type}`);
+    throw new MessageValidationError(
+      `Unknown runner message type: ${msg.type}`,
+    );
   }
   validateFields(msg, fields);
-  return msg as AgentToHubMsg;
+  return msg as RunnerToHubMsg;
 }
 
 export function serialize(msg: { type: string }): string {
