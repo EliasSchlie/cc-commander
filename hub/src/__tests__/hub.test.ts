@@ -606,6 +606,47 @@ describe("pending history cleanup", () => {
     await closeWs(runnerWs);
   });
 
+  // Prevents: client spinning forever when a connected runner never replies
+  // (deadlock, dropped message, runner bug). The TTL must drop the entry AND
+  // notify the client so its requestId resolves.
+  it("notifies client with empty history when TTL expires", async () => {
+    await hub.stop();
+    db.close();
+    db = new HubDb(":memory:");
+    auth = new AuthService(db, JWT_SECRET);
+    hub = new Hub({ port: 0, db, auth, historyRequestTtlMs: 50 });
+    await hub.start();
+    const addr = hub.httpServer.address();
+    port = typeof addr === "object" && addr ? addr.port : 0;
+    baseUrl = `http://localhost:${port}`;
+
+    const tokens = await auth.register("user@test.com", "pass");
+    const account = db.getAccountByEmail("user@test.com")!;
+    const machine = db.createMachine(account.id, "Test Machine");
+    const session = db.createSession(account.id, machine.id, "/tmp", "idle");
+
+    const runnerWs = await connectRunner(machine.registrationToken);
+    const clientWs = await connectClient(tokens.token);
+    await new Promise((r) => setTimeout(r, 100));
+
+    // Runner is connected but will not reply -- swallow the request.
+    runnerWs.on("message", () => {});
+
+    const historyMsg = waitForMsg(
+      clientWs,
+      (m) => m.type === "session_history",
+    );
+    send(clientWs, { type: "get_session_history", sessionId: session.id });
+
+    const reply = await historyMsg;
+    assert.equal(reply.sessionId, session.id);
+    assert.deepEqual(reply.messages, []);
+    assert.equal(hub.pendingHistoryRequests.size, 0);
+
+    await closeWs(clientWs);
+    await closeWs(runnerWs);
+  });
+
   // Prevents: pending history entries leaking when the runner crashes mid-request
   it("clears pending history requests when the runner disconnects", async () => {
     const tokens = await auth.register("user@test.com", "pass");

@@ -42,6 +42,13 @@ export interface HubConfig {
    * the runner self-update protocol (runners will see "" and skip).
    */
   version?: string;
+  /**
+   * How long to wait for a runner reply to a get_session_history request
+   * before giving up, dropping the pending entry, and notifying the client
+   * with an empty history. Defaults to 30 seconds. Lower values are useful
+   * in tests.
+   */
+  historyRequestTtlMs?: number;
 }
 
 export class Hub {
@@ -433,11 +440,24 @@ export class Hub {
     const result = this.resolveSessionRunner(conn, msg.sessionId);
     if (!result) return;
     const requestId = randomUUID();
-    // Bound map growth: a misbehaving or hung runner must not be able to
-    // pin pending entries indefinitely.
+    // Bound map growth and unblock the client: a runner that stays
+    // connected but never replies (deadlock, dropped message, bug)
+    // would otherwise leave the client spinning forever waiting on
+    // its requestId.
     const timer = setTimeout(() => {
+      const pending = this.pendingHistoryRequests.get(requestId);
+      if (!pending) return;
       this.pendingHistoryRequests.delete(requestId);
-    }, PENDING_HISTORY_TTL_MS);
+      console.warn(
+        `[hub] session_history TTL expired for request ${requestId} on machine ${pending.machineId}`,
+      );
+      this.sendToClient(pending.conn, {
+        type: "session_history",
+        sessionId: msg.sessionId,
+        requestId,
+        messages: [],
+      });
+    }, this.config.historyRequestTtlMs ?? PENDING_HISTORY_TTL_MS);
     timer.unref();
     this.pendingHistoryRequests.set(requestId, {
       conn,
