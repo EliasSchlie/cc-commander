@@ -46,11 +46,15 @@ The compose file binds the container to `127.0.0.1:3000` so it is **not**
 publicly reachable until you put a reverse proxy in front of it. SQLite is
 persisted in the named volume `hub-data`.
 
-### Updating: pull + restart
+### Updating: auto-deploy on push to main
 
-The hub image is built and pushed to GHCR by `.github/workflows/release.yml`
-on every push to `main` and on every `v*` tag. To pull a new build on the
-VPS:
+`.github/workflows/release.yml` builds and pushes the hub image to GHCR
+on every push to `main`, then SSHes into the VPS and rolls the
+container forward. No manual step is required once the deploy secrets
+are configured (see "Auto-deploy secrets" below).
+
+If the auto-deploy job is disabled (no `DEPLOY_SSH_HOST` secret), or
+you want to deploy a one-off build by hand on the VPS:
 
 ```sh
 cd cc-commander/hub
@@ -58,24 +62,38 @@ git pull
 JWT_SECRET=... docker compose up -d --build
 ```
 
-If you'd rather pull the prebuilt image instead of rebuilding from source,
-edit `docker-compose.yml` to use `image: ghcr.io/eliasschlie/cc-commander-hub:main`
-and run `docker compose pull && docker compose up -d`.
+#### Auto-deploy secrets
+
+Set these in **Repo Settings → Secrets → Actions**:
+
+| Secret             | Notes                                                           |
+| ------------------ | --------------------------------------------------------------- |
+| `DEPLOY_SSH_HOST`  | VPS hostname. Presence of this secret enables the deploy job.   |
+| `DEPLOY_SSH_USER`  | SSH user (e.g. `ccuser`)                                        |
+| `DEPLOY_SSH_KEY`   | Private key. Pubkey lives in `~/.ssh/authorized_keys` on the VPS. |
+| `DEPLOY_SSH_PORT`  | Optional, defaults to 22                                        |
+| `DEPLOY_HUB_DIR`   | Optional, defaults to `~/cc-commander/hub`                      |
+
+The deploy job runs `git fetch && git reset --hard origin/main` on the
+VPS, then `docker compose up -d --build --force-recreate`, then polls
+`https://$DEPLOY_SSH_HOST/api/version` until it reports the SHA CI just
+built. If the verify step times out (~90s), the workflow fails loudly
+so a stale rollout doesn't go unnoticed.
 
 ### How runners stay in sync with the hub
 
-The hub bakes a `VERSION` (git short SHA on `main` builds, or the tag name
-on `v*` builds) into the image and serves it from `GET /api/version`.
-Each runner polls that endpoint every 5 minutes (configurable via
-`CC_COMMANDER_POLL_MS`). When the runner's own checked-out commit no
-longer matches the hub's `VERSION`, the runner runs `runner/scripts/update.sh`
-(`git fetch && git checkout origin/main && npm ci -w cc-commander-runner`), exits cleanly,
-and launchd restarts it against the new code. Logs land in
+The hub bakes a `VERSION` (full git SHA) into the image and serves it
+from `GET /api/version`. Each runner polls that endpoint every 5 minutes
+(configurable via `CC_COMMANDER_POLL_MS`). When the runner's own
+checked-out commit no longer matches the hub's `VERSION`, the runner
+runs `runner/scripts/update.sh` synchronously (`git fetch && git
+checkout origin/main && npm ci`), then exits and launchd restarts it
+against the new code. Logs land in
 `~/Library/Logs/cc-commander-runner-update.log`.
 
-So the deploy story is: **push to main → CI builds the hub image with
-the new SHA → you redeploy the hub → every runner picks up the new code
-within 5 minutes**. No per-runner intervention.
+So the deploy story is: **push to main → CI builds and SSH-deploys the
+hub → every runner picks up the new code within 5 minutes**. No
+per-runner intervention.
 
 If the hub's `VERSION` is empty (e.g. local dev hub), runners skip the
 self-update protocol entirely.

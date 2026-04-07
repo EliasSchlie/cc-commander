@@ -264,7 +264,7 @@ export class Hub {
       // Debug endpoint reads live state directly off the Hub. Closure
       // (rather than passing the Hub class) keeps routes/ from
       // depending on hub.ts; see RouteContext jsdoc.
-      debugSnapshot: () => this.debugSnapshot(),
+      debugSnapshot: (accountId) => this.debugSnapshot(accountId),
     };
   }
 
@@ -273,8 +273,18 @@ export class Hub {
    * never returns auth tokens, registration tokens, account ids, or
    * any per-user content. Designed to be safe to surface to anyone who
    * already has a hub-issued JWT.
+   *
+   * `runners.machineIds` is filtered to the requesting account so one
+   * account can't enumerate every other account's connected machines.
+   * Aggregate counts (`runners.count`, `clients.count`,
+   * `clients.accounts`) stay global -- they're hub-wide health
+   * signals already exposed via metrics.
    */
-  debugSnapshot(): DebugSnapshot {
+  debugSnapshot(accountId: string): DebugSnapshot {
+    const ownMachineIds: string[] = [];
+    for (const conn of this.runners.values()) {
+      if (conn.accountId === accountId) ownMachineIds.push(conn.machineId);
+    }
     return {
       version: this.config.version ?? "",
       startedAt: this.startedAt,
@@ -283,7 +293,7 @@ export class Hub {
       port: this.config.port,
       runners: {
         count: this.runners.size,
-        machineIds: Array.from(this.runners.keys()),
+        machineIds: ownMachineIds,
       },
       clients: {
         count: this.clients.size,
