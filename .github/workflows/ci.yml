@@ -58,16 +58,15 @@ jobs:
             -destination 'platform=macOS' \
             -quiet
 
-      - name: Install iOS platform
-        # macos-15 runners ship Xcode 16 but without the iOS platform.
-        # Download it on demand (~3 GB, ~1 min).
-        run: sudo xcodebuild -downloadPlatform iOS
-
       - name: Build iOS app
+        # macos-15 runners ship the iOS 18 SDK but no simulator runtime,
+        # so -destination 'iOS Simulator' fails. Use -sdk + -arch directly
+        # to compile against the SDK without needing a runtime.
         run: |
           xcodebuild build \
             -project CCCommander.xcodeproj \
             -scheme CCCommander_iOS \
-            -destination 'generic/platform=iOS' \
+            -sdk iphoneos18.0 \
+            -arch arm64 \
             CODE_SIGNING_ALLOWED=NO \
             -quiet
