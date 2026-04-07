@@ -34,10 +34,10 @@ export interface RouteContext {
   /**
    * Returns a redacted snapshot of hub state for /api/debug/state.
    * Closure (not a Hub reference) so the routes/ layer doesn't pull
-   * in hub.ts; the literal carries only counts and ids that already
-   * appear in metrics or are derivable from public message flow.
+   * in hub.ts. `accountId` scopes per-account fields; see
+   * Hub.debugSnapshot() for the full contract.
    */
-  debugSnapshot(): DebugSnapshot;
+  debugSnapshot(accountId: string): DebugSnapshot;
 }
 
 /**

@@ -11,12 +11,10 @@
  *   - All counter snapshots from the Metrics module
  *
  * Auth: requires a valid hub-issued JWT in the Authorization header.
- * Same verification path as /ws/client. The endpoint is read-only and
- * deliberately leaks no per-account or per-session content -- it
- * surfaces *what already shows up in metrics*, never tokens or DB
- * rows. Anyone holding any account's JWT can call it; that's an
- * intentional trade-off so the hub doesn't need a separate admin role
- * just for introspection.
+ * Same verification path as /ws/client. Per-account fields
+ * (`runners.machineIds`, `recentFailedSessions`) are scoped to the
+ * requester's account so one account can't enumerate other accounts'
+ * machines or read their failure logs.
  */
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { JwtPayload } from "../auth.ts";
@@ -43,7 +41,7 @@ export function handleDebugState(
     return;
   }
 
-  const snapshot = ctx.debugSnapshot();
+  const snapshot = ctx.debugSnapshot(payload.accountId);
 
   // Per-account post-mortem slice. Limited to the requester's
   // account so /api/debug/state can return failed sessions without
