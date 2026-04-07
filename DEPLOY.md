@@ -30,12 +30,17 @@ git clone https://github.com/EliasSchlie/cc-commander.git
 cd cc-commander/hub
 
 # Generate a JWT secret (>= 32 chars). Save it somewhere safe.
-export JWT_SECRET=$(openssl rand -hex 32)
+# (Append, don't clobber: a future .env may carry other vars.)
+[ -f .env ] || touch .env
+grep -q '^JWT_SECRET=' .env || echo "JWT_SECRET=$(openssl rand -hex 32)" >> .env
 
-# Build + start. The compose file builds with the repo root as the
-# Docker context because the hub depends on the workspace package
-# @cc-commander/protocol (sibling directory).
-docker compose up -d --build
+# Pull the prebuilt image from GHCR and start. The :main tag is
+# updated by .github/workflows/release.yml on every push to main.
+# (For local dev where you want to build from source instead, run
+# `docker compose up -d --build` -- the compose file carries both
+# `image:` and `build:` for that case.)
+docker compose pull
+docker compose up -d
 
 # Verify
 curl -s http://localhost:3000/api/health
@@ -54,12 +59,13 @@ container forward. No manual step is required once the deploy secrets
 are configured (see "Auto-deploy secrets" below).
 
 If the auto-deploy job is disabled (no `DEPLOY_SSH_HOST` secret), or
-you want to deploy a one-off build by hand on the VPS:
+you want to roll a deploy by hand on the VPS:
 
 ```sh
 cd cc-commander/hub
 git pull
-JWT_SECRET=... docker compose up -d --build
+docker compose pull
+docker compose up -d
 ```
 
 #### Auto-deploy secrets
@@ -75,10 +81,11 @@ Set these in **Repo Settings → Secrets → Actions**:
 | `DEPLOY_HUB_DIR`   | Optional, defaults to `~/cc-commander/hub`                      |
 
 The deploy job runs `git fetch && git reset --hard origin/main` on the
-VPS, then `docker compose up -d --build --force-recreate`, then polls
-`https://$DEPLOY_SSH_HOST/api/version` until it reports the SHA CI just
-built. If the verify step times out (~90s), the workflow fails loudly
-so a stale rollout doesn't go unnoticed.
+VPS (only to refresh `docker-compose.yml` -- no source build happens
+on the VPS), then `docker compose pull && docker compose up -d`, then
+polls `https://$DEPLOY_SSH_HOST/api/version` until it reports the SHA
+CI just built. If the verify step times out (~90s), the workflow
+fails loudly so a stale rollout doesn't go unnoticed.
 
 ### How runners stay in sync with the hub
 
