@@ -179,6 +179,11 @@ describe("cwd validation", () => {
       await runner.connect();
       await waitForRunnerMsg((m) => m.type === "runner_hello");
 
+      const allMsgs: any[] = [];
+      runnerSocket!.on("message", (data) => {
+        allMsgs.push(JSON.parse(data.toString()));
+      });
+
       const errPromise = waitForRunnerMsg((m) => m.type === "session_error");
       sendToRunner({
         type: "hub_start_session",
@@ -189,6 +194,15 @@ describe("cwd validation", () => {
       const err = await errPromise;
       assert.match(err.error, matches);
       assert.equal(queryInvoked, false, "SDK must not be invoked for bad cwd");
+      // No running→error flap: a bad cwd must reject before the
+      // running status is broadcast.
+      assert.equal(
+        allMsgs.find(
+          (m) => m.type === "session_status" && m.status === "running",
+        ),
+        undefined,
+        "running status must not be emitted before cwd validation",
+      );
 
       runner.disconnect();
     });

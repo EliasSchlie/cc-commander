@@ -191,6 +191,26 @@ export class MachineRunner {
     prompt: string,
     extra: { cwd?: string; resume?: string },
   ): Promise<void> {
+    // SDK chdir failures surface as "Claude Code executable not found
+    // at .../cli.js" -- catch the bad cwd here so the user sees the
+    // real cause. Done before touching `this.sessions` so a bad-cwd
+    // retry doesn't kill the previously running session for the same
+    // id and doesn't flap the session through running→error.
+    if (extra.cwd !== undefined) {
+      const cwdError = validateCwd(extra.cwd);
+      if (cwdError) {
+        console.error(
+          `[runner] runSession sid=${sessionId} rejecting cwd "${extra.cwd}": ${cwdError}`,
+        );
+        this.sendToHub({
+          type: "session_error",
+          sessionId,
+          error: cwdError,
+        });
+        return;
+      }
+    }
+
     const existing = this.sessions.get(sessionId);
     if (existing) {
       existing.abortController.abort();
@@ -211,27 +231,6 @@ export class MachineRunner {
     console.log(
       `[runner] runSession start sid=${sessionId} cwd=${extra.cwd ?? "<none>"} resume=${extra.resume ?? "<none>"} promptLen=${prompt.length}`,
     );
-
-    // SDK chdir failures surface as "Claude Code executable not found
-    // at .../cli.js" -- catch the bad cwd here so the user sees the
-    // real cause.
-    if (extra.cwd !== undefined) {
-      const cwdError = validateCwd(extra.cwd);
-      if (cwdError) {
-        console.error(
-          `[runner] runSession sid=${sessionId} rejecting cwd "${extra.cwd}": ${cwdError}`,
-        );
-        this.sendToHub({
-          type: "session_error",
-          sessionId,
-          error: cwdError,
-        });
-        if (this.sessions.get(sessionId) === session) {
-          this.sessions.delete(sessionId);
-        }
-        return;
-      }
-    }
 
     let promptCounter = 0;
     let streamCount = 0;
