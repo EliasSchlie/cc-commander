@@ -1,0 +1,31 @@
+name: CCCommander
+options:
+  deploymentTarget:
+    iOS: "17.0"
+    macOS: "14.0"
+  bundleIdPrefix: com.cc-commander
+  xcodeVersion: "16.0"
+packages:
+  CCCommanderPackage:
+    path: CCCommanderPackage
+targets:
+  CCCommander:
+    type: application
+    platform: [iOS, macOS]
+    sources:
+      - CCCommander
+    dependencies:
+      - package: CCCommanderPackage
+        product: CCModels
+      - package: CCCommanderPackage
+        product: CCNetworking
+      - package: CCCommanderPackage
+        product: CCApp
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.cc-commander.app
+        INFOPLIST_KEY_CFBundleDisplayName: CC Commander
+        SWIFT_VERSION: "5.9"
+        GENERATE_INFOPLIST_FILE: YES
+        CURRENT_PROJECT_VERSION: 1
+        MARKETING_VERSION: 0.1.0

@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  node:
+    name: ${{ matrix.component }} (Node)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        component: [hub, runner]
+    defaults:
+      run:
+        working-directory: ${{ matrix.component }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: ${{ matrix.component }}/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+
+  swift:
+    name: Swift package + macOS app
+    # Xcode 16 (macos-15) is needed for:
+    #   - the swift-testing 'Testing' module used by the package tests
+    #   - the .xcodeproj objectVersion 77 the project was generated with
+    # The iOS app build is intentionally skipped in CI: macos-15 ships
+    # the iOS 18 SDK but no simulator runtime, and downloading one in CI
+    # is slow and flaky. Cross-platform code is exercised by `swift test`,
+    # and the iOS-specific code is a small set of SwiftUI #if os(iOS) blocks.
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select Xcode 16
+        run: sudo xcode-select -s /Applications/Xcode_16.app
+
+      - name: Run Swift package tests
+        working-directory: client/swift/CCCommanderPackage
+        run: swift test
+
+      - name: Build macOS app
+        working-directory: client/swift
+        run: |
+          xcodebuild build \
+            -project CCCommander.xcodeproj \
+            -scheme CCCommander_macOS \
+            -destination 'platform=macOS' \
+            -quiet
