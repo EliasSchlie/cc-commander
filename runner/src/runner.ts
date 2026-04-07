@@ -2,12 +2,13 @@ import { WebSocket } from "ws";
 import { query, getSessionMessages } from "@anthropic-ai/claude-agent-sdk";
 import { parseHubMessage, serialize } from "@cc-commander/protocol";
 import type {
-  DroppedBlockReason,
-  DroppedBlockType,
+  DroppedToolBlockMsg,
   HubToRunnerMsg,
   RunnerToHubMsg,
   UserPromptResponse,
 } from "@cc-commander/protocol";
+
+type DroppedToolBlockPayload = Omit<DroppedToolBlockMsg, "type" | "sessionId">;
 
 const ASK_USER_TOOL = "AskUserQuestion";
 const MAX_SDK_SESSION_IDS = 1000;
@@ -356,7 +357,11 @@ export class MachineRunner {
           for (const bl of content) {
             if (bl.type === "tool_use" && bl.name !== ASK_USER_TOOL) {
               if (typeof bl.id !== "string") {
-                this.dropToolBlock(sessionId, "tool_use", "missing_id", bl);
+                this.dropToolBlock(
+                  sessionId,
+                  { blockType: "tool_use", reason: "missing_id" },
+                  bl,
+                );
                 continue;
               }
               this.sendToHub({
@@ -379,8 +384,7 @@ export class MachineRunner {
               if (typeof bl.tool_use_id !== "string") {
                 this.dropToolBlock(
                   sessionId,
-                  "tool_result",
-                  "missing_tool_use_id",
+                  { blockType: "tool_result", reason: "missing_tool_use_id" },
                   bl,
                 );
                 continue;
@@ -458,22 +462,20 @@ export class MachineRunner {
 
   private dropToolBlock(
     sessionId: string,
-    blockType: DroppedBlockType,
-    reason: DroppedBlockReason,
+    payload: DroppedToolBlockPayload,
     raw: unknown,
   ): void {
     // Surface SDK shape drift at the source instead of as a silent
     // hub-side rejection downstream. The dropped_tool_block message
     // is the structured signal; the log line is the human view.
     console.error(
-      `[runner] dropped ${blockType} (${reason}): ${JSON.stringify(raw).slice(0, 200)}`,
+      `[runner] dropped ${payload.blockType} (${payload.reason}): ${JSON.stringify(raw).slice(0, 200)}`,
     );
     this.sendToHub({
       type: "dropped_tool_block",
       sessionId,
-      blockType,
-      reason,
-    });
+      ...payload,
+    } as DroppedToolBlockMsg);
   }
 
   // ── Prompt resolution ─────────────────────────────────────────────────

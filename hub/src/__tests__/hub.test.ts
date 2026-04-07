@@ -684,6 +684,42 @@ describe("pending history cleanup", () => {
 
     await closeWs(clientWs);
   });
+
+  // Locks in the "observability-only, never client-facing" contract for
+  // dropped_tool_block. If a future refactor accidentally routed it
+  // through relayToClients we'd leak SDK shape drift to every client.
+  it("does not relay dropped_tool_block to clients", async () => {
+    const tokens = await auth.register("user@test.com", "pass");
+    const account = db.getAccountByEmail("user@test.com")!;
+    const machine = db.createMachine(account.id, "Test Machine");
+
+    const runnerWs = await connectRunner(machine.registrationToken);
+    const clientWs = await connectClient(tokens.token);
+    await new Promise((r) => setTimeout(r, 100));
+
+    const clientMsgs: any[] = [];
+    clientWs.on("message", (data) =>
+      clientMsgs.push(JSON.parse(data.toString())),
+    );
+
+    runnerWs.send(
+      JSON.stringify({
+        type: "dropped_tool_block",
+        sessionId: "s1",
+        blockType: "tool_use",
+        reason: "missing_id",
+      }),
+    );
+    await new Promise((r) => setTimeout(r, 100));
+
+    assert.equal(
+      clientMsgs.find((m) => m.type === "dropped_tool_block"),
+      undefined,
+    );
+
+    await closeWs(clientWs);
+    await closeWs(runnerWs);
+  });
 });
 
 // ── Rate limiting ───────────────────────────────────────────────────────

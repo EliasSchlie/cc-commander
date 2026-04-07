@@ -431,6 +431,10 @@ describe("session history", () => {
     const msg = await waitForRunnerMsg((m) => m.type === "session_history");
     assert.equal(msg.requestId, "req-1");
     assert.deepEqual(msg.messages, []);
+    // Empty history for an unknown session must carry the no_session
+    // error code so the client can distinguish "nothing yet" from
+    // "fetch failed" or "timed out".
+    assert.equal(msg.error, "no_session");
 
     runner.disconnect();
   });

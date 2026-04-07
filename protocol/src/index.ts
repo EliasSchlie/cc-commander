@@ -198,20 +198,37 @@ export interface SessionHistoryMsg {
   error?: HistoryErrorCode;
 }
 
-export type DroppedBlockType = "tool_use" | "tool_result";
-export type DroppedBlockReason = "missing_id" | "missing_tool_use_id";
-
 /**
  * Runner→hub signal that an SDK content block failed a runtime guard
  * and was skipped. Pure observability; hub counts these to surface SDK
- * shape drift.
+ * shape drift. Discriminated on blockType so illegal (blockType,reason)
+ * pairs are unrepresentable at compile time.
  */
-export interface DroppedToolBlockMsg {
-  type: "dropped_tool_block";
-  sessionId: string;
-  blockType: DroppedBlockType;
-  reason: DroppedBlockReason;
-}
+export type DroppedToolBlockMsg =
+  | {
+      type: "dropped_tool_block";
+      sessionId: string;
+      blockType: "tool_use";
+      reason: "missing_id";
+    }
+  | {
+      type: "dropped_tool_block";
+      sessionId: string;
+      blockType: "tool_result";
+      reason: "missing_tool_use_id";
+    };
+
+/** All valid (blockType, reason) pairs, used by the runtime parser. */
+const DROPPED_TOOL_BLOCK_PAIRS = new Set<string>([
+  "tool_use|missing_id",
+  "tool_result|missing_tool_use_id",
+]);
+
+const HISTORY_ERROR_CODES = new Set<string>([
+  "timeout",
+  "no_session",
+  "fetch_failed",
+]);
 
 export interface RunnerHelloMsg {
   type: "runner_hello";
@@ -278,7 +295,12 @@ const CLIENT_MSG_REQUIRED_FIELDS: Record<string, readonly string[]> = {
   list_machines: [],
 };
 
-const RUNNER_MSG_REQUIRED_FIELDS: Record<string, readonly string[]> = {
+// Typed by the message type union so adding a new RunnerToHubMsg variant
+// without a validation entry is a compile error.
+const RUNNER_MSG_REQUIRED_FIELDS: Record<
+  RunnerToHubMsg["type"],
+  readonly string[]
+> = {
   stream_text: ["sessionId", "content"],
   tool_call: ["sessionId", "toolCallId", "toolName", "display"],
   tool_result: ["sessionId", "toolCallId", "content"],
@@ -343,13 +365,33 @@ export function parseClientMessage(data: string): ClientToHubMsg {
 
 export function parseRunnerMessage(data: string): RunnerToHubMsg {
   const msg = parseEnvelope(data);
-  const fields = RUNNER_MSG_REQUIRED_FIELDS[msg.type as string];
+  const fields = RUNNER_MSG_REQUIRED_FIELDS[msg.type as RunnerToHubMsg["type"]];
   if (!fields) {
     throw new MessageValidationError(
       `Unknown runner message type: ${msg.type as string}`,
     );
   }
   validateFields(msg, fields);
+  // Closed-set checks for fields whose values land in hub logs and (in
+  // A3) become metric labels. Without these a misbehaving runner could
+  // inject arbitrary tokens into hub-side log lines / counter keys.
+  if (msg.type === "dropped_tool_block") {
+    const pair = `${msg.blockType as string}|${msg.reason as string}`;
+    if (!DROPPED_TOOL_BLOCK_PAIRS.has(pair)) {
+      throw new MessageValidationError(
+        `Invalid dropped_tool_block: unknown (blockType, reason) pair "${pair}"`,
+      );
+    }
+  }
+  if (
+    msg.type === "session_history" &&
+    msg.error !== undefined &&
+    !HISTORY_ERROR_CODES.has(msg.error as string)
+  ) {
+    throw new MessageValidationError(
+      `Invalid session_history: unknown error code "${msg.error as string}"`,
+    );
+  }
   return msg as unknown as RunnerToHubMsg;
 }
 

@@ -137,6 +137,39 @@ describe("parseRunnerMessage", () => {
     );
   });
 
+  // A misbehaving runner could otherwise inject arbitrary tokens into
+  // hub log lines and (in A3) metric label keys. Validate the closed
+  // (blockType, reason) pair set at the boundary.
+  it("rejects dropped_tool_block with unknown blockType", () => {
+    assert.throws(
+      () =>
+        parseRunnerMessage(
+          '{"type":"dropped_tool_block","sessionId":"s1","blockType":"banana","reason":"missing_id"}',
+        ),
+      /unknown \(blockType, reason\) pair/,
+    );
+  });
+
+  it("rejects dropped_tool_block with mismatched (blockType, reason)", () => {
+    assert.throws(
+      () =>
+        parseRunnerMessage(
+          '{"type":"dropped_tool_block","sessionId":"s1","blockType":"tool_use","reason":"missing_tool_use_id"}',
+        ),
+      /unknown \(blockType, reason\) pair/,
+    );
+  });
+
+  it("rejects session_history with unknown error code", () => {
+    assert.throws(
+      () =>
+        parseRunnerMessage(
+          '{"type":"session_history","sessionId":"s1","requestId":"r1","messages":[],"error":"banana"}',
+        ),
+      /unknown error code/,
+    );
+  });
+
   // Degraded session_history replies must carry a stable error code so
   // clients can branch on it (e.g. render "history unavailable: timeout").
   it("accepts session_history with error code", () => {
