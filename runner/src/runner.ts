@@ -17,6 +17,25 @@ interface ActiveSession {
   pendingPrompts: Map<string, (response: UserPromptResponse) => void>;
 }
 
+type CanUseToolResult =
+  | { behavior: "allow"; updatedInput?: Record<string, unknown> }
+  | { behavior: "deny"; message: string };
+
+interface QueryOptions {
+  maxTurns: number;
+  permissionMode: "bypassPermissions";
+  allowDangerouslySkipPermissions: boolean;
+  includePartialMessages: boolean;
+  abortController: AbortController;
+  canUseTool: (
+    toolName: string,
+    input: Record<string, unknown>,
+    opts: { title?: string },
+  ) => Promise<CanUseToolResult>;
+  cwd?: string;
+  resume?: string;
+}
+
 export type QueryFn = typeof query;
 export type GetSessionMessagesFn = typeof getSessionMessages;
 
@@ -104,11 +123,7 @@ export class MachineRunner {
     }
     for (const [, session] of this.sessions) {
       session.abortController.abort();
-      // Reject any pending prompt promises so canUseTool doesn't hang
-      for (const [, resolver] of session.pendingPrompts) {
-        resolver({ kind: "deny", message: "Runner disconnected" });
-      }
-      session.pendingPrompts.clear();
+      rejectPendingPrompts(session, "Runner disconnected");
     }
     this.sessions.clear();
     if (this.ws) {
@@ -156,7 +171,12 @@ export class MachineRunner {
     extra: { cwd?: string; resume?: string },
   ): Promise<void> {
     const existing = this.sessions.get(sessionId);
-    if (existing) existing.abortController.abort();
+    if (existing) {
+      existing.abortController.abort();
+      // Unblock canUseTool of the aborted session; the replacement gets
+      // a fresh pendingPrompts map below.
+      rejectPendingPrompts(existing, "Session restarted");
+    }
 
     const abortController = new AbortController();
     const session: ActiveSession = {
@@ -171,7 +191,7 @@ export class MachineRunner {
     let promptCounter = 0;
 
     try {
-      const options: Record<string, any> = {
+      const options: QueryOptions = {
         maxTurns: 50,
         permissionMode: "bypassPermissions",
         allowDangerouslySkipPermissions: true,
@@ -180,7 +200,7 @@ export class MachineRunner {
         canUseTool: async (
           toolName: string,
           input: Record<string, unknown>,
-          opts: any,
+          opts: { title?: string },
         ) => {
           return this.handleCanUseTool(
             session,
@@ -214,7 +234,12 @@ export class MachineRunner {
         }
         this.sdkSessionIds.set(sessionId, session.sdkSessionId);
       }
-      this.sessions.delete(sessionId);
+      // Only delete if we're still the active session for this id. A
+      // concurrent restart may have already replaced the entry; deleting
+      // unconditionally would orphan the new run.
+      if (this.sessions.get(sessionId) === session) {
+        this.sessions.delete(sessionId);
+      }
     }
   }
 
@@ -234,11 +259,8 @@ export class MachineRunner {
     promptId: string,
     toolName: string,
     input: Record<string, unknown>,
-    opts: any,
-  ): Promise<
-    | { behavior: "allow"; updatedInput?: Record<string, unknown> }
-    | { behavior: "deny"; message: string }
-  > {
+    opts: { title?: string },
+  ): Promise<CanUseToolResult> {
     const { sessionId } = session;
 
     if (toolName === ASK_USER_TOOL) {
@@ -441,6 +463,13 @@ export class MachineRunner {
       resolver(response);
     }
   }
+}
+
+function rejectPendingPrompts(session: ActiveSession, message: string): void {
+  for (const [, resolver] of session.pendingPrompts) {
+    resolver({ kind: "deny", message });
+  }
+  session.pendingPrompts.clear();
 }
 
 function formatToolDisplay(

@@ -632,3 +632,162 @@ describe("pending history cleanup", () => {
     await closeWs(clientWs);
   });
 });
+
+// ── Input validation ────────────────────────────────────────────────────
+
+describe("input validation", () => {
+  // Prevents: clients passing parent-segment paths through to the runner
+  // (defence-in-depth; the runner is the actual sandbox)
+  it("rejects start_session with a non-absolute directory", async () => {
+    const tokens = await auth.register("user@test.com", "pass");
+    const account = db.getAccountByEmail("user@test.com")!;
+    const machine = db.createMachine(account.id, "Test Machine");
+    await connectRunner(machine.registrationToken);
+    const clientWs = await connectClient(tokens.token);
+    await new Promise((r) => setTimeout(r, 100));
+
+    const errorPromise = waitForMsg(
+      clientWs,
+      (m) => m.type === "error" && /directory/i.test(m.message),
+    );
+    send(clientWs, {
+      type: "start_session",
+      machineId: machine.id,
+      directory: "relative/path",
+      prompt: "hi",
+    });
+    await errorPromise;
+    assert.equal(db.listSessionsForAccount(account.id).length, 0);
+
+    await closeWs(clientWs);
+  });
+
+  // Prevents: `..` segments sneaking through path validation
+  it("rejects start_session with a parent-segment directory", async () => {
+    const tokens = await auth.register("user@test.com", "pass");
+    const account = db.getAccountByEmail("user@test.com")!;
+    const machine = db.createMachine(account.id, "Test Machine");
+    await connectRunner(machine.registrationToken);
+    const clientWs = await connectClient(tokens.token);
+    await new Promise((r) => setTimeout(r, 100));
+
+    const errorPromise = waitForMsg(
+      clientWs,
+      (m) => m.type === "error" && /directory/i.test(m.message),
+    );
+    send(clientWs, {
+      type: "start_session",
+      machineId: machine.id,
+      directory: "/var/data/../../etc",
+      prompt: "hi",
+    });
+    await errorPromise;
+    assert.equal(db.listSessionsForAccount(account.id).length, 0);
+
+    await closeWs(clientWs);
+  });
+
+  // Prevents: an attacker registering machines with absurdly long names that
+  // could break UI rendering or balloon broadcast payloads
+  it("rejects machine creation with an over-long name", async () => {
+    const tokens = await auth.register("user@test.com", "pass");
+    const longName = "x".repeat(200);
+    const { status } = await postJson(
+      "/api/machines",
+      { name: longName },
+      tokens.token,
+    );
+    assert.equal(status, 400);
+  });
+});
+
+// ── session_history reply routing ───────────────────────────────────────
+
+describe("session_history reply routing", () => {
+  // Prevents: a buggy or malicious runner spamming fabricated session_history
+  // messages and having the hub broadcast them to every client on the account
+  it("drops session_history with unknown requestId instead of broadcasting", async () => {
+    const tokens = await auth.register("user@test.com", "pass");
+    const account = db.getAccountByEmail("user@test.com")!;
+    const machine = db.createMachine(account.id, "Test Machine");
+    const session = db.createSession(account.id, machine.id, "/tmp", "idle");
+
+    const runnerWs = await connectRunner(machine.registrationToken);
+    const clientWs = await connectClient(tokens.token);
+    await new Promise((r) => setTimeout(r, 100));
+
+    let received = false;
+    clientWs.on("message", (data) => {
+      const m = JSON.parse(data.toString());
+      if (m.type === "session_history") received = true;
+    });
+
+    // Runner sends an unsolicited session_history with a fabricated requestId
+    runnerWs.send(
+      JSON.stringify({
+        type: "session_history",
+        sessionId: session.id,
+        requestId: "fabricated-id",
+        messages: [{ role: "assistant", content: "leaked" }],
+      }),
+    );
+    await new Promise((r) => setTimeout(r, 150));
+    assert.equal(received, false);
+
+    await closeWs(clientWs);
+    await closeWs(runnerWs);
+  });
+
+  // Prevents: a second runner on the same account replying to a pending
+  // history request that was actually directed at the first runner
+  it("drops session_history when the replying machineId doesn't match", async () => {
+    const tokens = await auth.register("user@test.com", "pass");
+    const account = db.getAccountByEmail("user@test.com")!;
+    const machineA = db.createMachine(account.id, "A");
+    const machineB = db.createMachine(account.id, "B");
+    const sessionOnA = db.createSession(
+      account.id,
+      machineA.id,
+      "/tmp",
+      "idle",
+    );
+
+    const runnerA = await connectRunner(machineA.registrationToken);
+    const runnerB = await connectRunner(machineB.registrationToken);
+    const clientWs = await connectClient(tokens.token);
+    await new Promise((r) => setTimeout(r, 100));
+
+    // Capture the requestId the hub sends to runnerA
+    const aSawRequest = new Promise<any>((resolve) => {
+      runnerA.once("message", (data) => resolve(JSON.parse(data.toString())));
+    });
+    send(clientWs, { type: "get_session_history", sessionId: sessionOnA.id });
+    const req = await aSawRequest;
+    assert.equal(req.type, "hub_get_history");
+    const stolenRequestId = req.requestId;
+
+    let received = false;
+    clientWs.on("message", (data) => {
+      const m = JSON.parse(data.toString());
+      if (m.type === "session_history") received = true;
+    });
+
+    // Runner B replies with the requestId that was sent to runner A
+    runnerB.send(
+      JSON.stringify({
+        type: "session_history",
+        sessionId: sessionOnA.id,
+        requestId: stolenRequestId,
+        messages: [{ role: "assistant", content: "spoofed" }],
+      }),
+    );
+    await new Promise((r) => setTimeout(r, 150));
+    assert.equal(received, false);
+    // The pending entry should still be there (not consumed by the bogus reply)
+    assert.equal(hub.pendingHistoryRequests.size, 1);
+
+    await closeWs(clientWs);
+    await closeWs(runnerA);
+    await closeWs(runnerB);
+  });
+});

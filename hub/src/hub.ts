@@ -48,10 +48,14 @@ export class Hub {
   config: HubConfig;
   clients: Map<string, ClientConnection>;
   runners: Map<string, RunnerConnection>;
-  /** Maps requestId -> { client that asked, machineId the request was sent to } */
+  /** Maps requestId -> { client that asked, machineId the request was sent to, expiry timer } */
   pendingHistoryRequests: Map<
     string,
-    { conn: ClientConnection; machineId: string }
+    {
+      conn: ClientConnection;
+      machineId: string;
+      timer: ReturnType<typeof setTimeout>;
+    }
   >;
   httpServer: ReturnType<typeof createServer>;
   wss: WebSocketServer;
@@ -77,6 +81,10 @@ export class Hub {
     return new Promise((resolve, reject) => {
       for (const [, conn] of this.clients) conn.ws.close();
       for (const [, conn] of this.runners) conn.ws.close();
+      for (const [, entry] of this.pendingHistoryRequests) {
+        clearTimeout(entry.timer);
+      }
+      this.pendingHistoryRequests.clear();
       this.wss.close(() => {
         this.httpServer.close((err) => (err ? reject(err) : resolve()));
       });
@@ -196,6 +204,15 @@ export class Hub {
       res.end(JSON.stringify({ error: "name required" }));
       return;
     }
+    if (name.length > MAX_MACHINE_NAME_LEN) {
+      res.writeHead(400);
+      res.end(
+        JSON.stringify({
+          error: `name must be ${MAX_MACHINE_NAME_LEN} characters or fewer`,
+        }),
+      );
+      return;
+    }
 
     try {
       const machine = this.config.db.createMachine(payload.accountId, name);
@@ -215,7 +232,7 @@ export class Hub {
     }
   }
 
-  /** Removes pending history request entries matching the predicate. No-op when the map is empty. */
+  /** Removes pending history request entries matching the predicate. Cancels their TTL timers. */
   private dropPendingHistoryFor(
     predicate: (entry: {
       conn: ClientConnection;
@@ -224,8 +241,18 @@ export class Hub {
   ): void {
     if (this.pendingHistoryRequests.size === 0) return;
     for (const [requestId, entry] of this.pendingHistoryRequests) {
-      if (predicate(entry)) this.pendingHistoryRequests.delete(requestId);
+      if (predicate(entry)) {
+        clearTimeout(entry.timer);
+        this.pendingHistoryRequests.delete(requestId);
+      }
     }
+  }
+
+  private deletePendingHistory(requestId: string): void {
+    const entry = this.pendingHistoryRequests.get(requestId);
+    if (!entry) return;
+    clearTimeout(entry.timer);
+    this.pendingHistoryRequests.delete(requestId);
   }
 
   // ── WebSocket ─────────────────────────────────────────────────────────
@@ -336,6 +363,14 @@ export class Hub {
     conn: ClientConnection,
     msg: { machineId: string; directory: string; prompt: string },
   ): void {
+    if (!isSafeDirectory(msg.directory)) {
+      this.sendToClient(conn, {
+        type: "error",
+        message:
+          "Invalid directory: must be an absolute path without parent-segment traversal",
+      });
+      return;
+    }
     const runnerConn = this.runners.get(msg.machineId);
     if (!runnerConn) {
       this.sendToClient(conn, { type: "error", message: "Machine is offline" });
@@ -398,9 +433,16 @@ export class Hub {
     const result = this.resolveSessionRunner(conn, msg.sessionId);
     if (!result) return;
     const requestId = randomUUID();
+    // Bound map growth: a misbehaving or hung runner must not be able to
+    // pin pending entries indefinitely.
+    const timer = setTimeout(() => {
+      this.pendingHistoryRequests.delete(requestId);
+    }, PENDING_HISTORY_TTL_MS);
+    timer.unref();
     this.pendingHistoryRequests.set(requestId, {
       conn,
       machineId: result.runnerConn.machineId,
+      timer,
     });
     this.sendToRunner(result.runnerConn, {
       type: "hub_get_history",
@@ -503,12 +545,24 @@ export class Hub {
 
       case "session_history": {
         const pending = this.pendingHistoryRequests.get(msg.requestId);
-        this.pendingHistoryRequests.delete(msg.requestId);
-        if (pending) {
-          this.sendToClient(pending.conn, msg);
-        } else {
-          this.relayToClients(conn.accountId, msg);
+        if (!pending) {
+          // Either expired (TTL fired) or fabricated by a misbehaving
+          // runner. Either way: do not broadcast unsolicited history to
+          // every client on the account.
+          console.warn(
+            `[hub] dropping session_history with unknown requestId from machine ${conn.machineId}`,
+          );
+          break;
         }
+        if (pending.machineId !== conn.machineId) {
+          // The runner that replied isn't the one we asked. Drop.
+          console.warn(
+            `[hub] session_history reply machineId mismatch (expected ${pending.machineId}, got ${conn.machineId})`,
+          );
+          break;
+        }
+        this.deletePendingHistory(msg.requestId);
+        this.sendToClient(pending.conn, msg);
         break;
       }
 
@@ -592,26 +646,48 @@ function extractBearerToken(req: IncomingMessage): string | null {
 }
 
 const MAX_BODY_BYTES = 1024 * 1024; // 1MB
+const MAX_MACHINE_NAME_LEN = 128;
+const PENDING_HISTORY_TTL_MS = 30_000;
+
+/**
+ * Validates a directory path supplied by a client. Must be a non-empty
+ * absolute POSIX path with no parent-segment traversal (`..`) and no NUL
+ * bytes. The runner is still responsible for ensuring the path actually
+ * exists and is accessible — this is a defence-in-depth check on the hub.
+ */
+function isSafeDirectory(dir: unknown): dir is string {
+  if (typeof dir !== "string" || dir.length === 0 || dir.length > 4096) {
+    return false;
+  }
+  if (!dir.startsWith("/")) return false;
+  if (dir.includes("\0")) return false;
+  for (const segment of dir.split("/")) {
+    if (segment === "..") return false;
+  }
+  return true;
+}
 
 function readBody(req: IncomingMessage): Promise<any> {
   return new Promise((resolve, reject) => {
-    let data = "";
+    const chunks: Buffer[] = [];
     let size = 0;
     req.on("data", (chunk: string | Buffer) => {
-      size += typeof chunk === "string" ? chunk.length : chunk.byteLength;
+      const buf = typeof chunk === "string" ? Buffer.from(chunk) : chunk;
+      size += buf.byteLength;
       if (size > MAX_BODY_BYTES) {
         req.destroy();
         reject(new Error("Request body too large"));
         return;
       }
-      data += chunk;
+      chunks.push(buf);
     });
     req.on("end", () => {
       try {
-        resolve(JSON.parse(data));
+        resolve(JSON.parse(Buffer.concat(chunks).toString("utf8")));
       } catch {
         reject(new Error("Invalid JSON body"));
       }
     });
+    req.on("error", (err) => reject(err));
   });
 }
