@@ -9,6 +9,7 @@ let package = Package(
         .macOS(.v14),
     ],
     products: [
+        .library(name: "CCLog", targets: ["CCLog"]),
         .library(name: "CCModels", targets: ["CCModels"]),
         .library(name: "CCNetworking", targets: ["CCNetworking"]),
         .library(name: "CCApp", targets: ["CCApp"]),
@@ -17,8 +18,12 @@ let package = Package(
     targets: [
         .executableTarget(
             name: "CCShadowClient",
-            dependencies: ["CCApp", "CCNetworking", "CCModels"],
+            dependencies: ["CCApp", "CCNetworking", "CCModels", "CCLog"],
             path: "Sources/CCShadowClient"
+        ),
+        .target(
+            name: "CCLog",
+            path: "Sources/CCLog"
         ),
         .target(
             name: "CCModels",
@@ -26,13 +31,18 @@ let package = Package(
         ),
         .target(
             name: "CCNetworking",
-            dependencies: ["CCModels"],
+            dependencies: ["CCModels", "CCLog"],
             path: "Sources/CCNetworking"
         ),
         .target(
             name: "CCApp",
-            dependencies: ["CCModels", "CCNetworking"],
+            dependencies: ["CCModels", "CCNetworking", "CCLog"],
             path: "Sources/CCApp"
+        ),
+        .testTarget(
+            name: "CCLogTests",
+            dependencies: ["CCLog"],
+            path: "Tests/CCLogTests"
         ),
         .testTarget(
             name: "CCModelsTests",
@@ -46,7 +56,7 @@ let package = Package(
         ),
         .testTarget(
             name: "CCAppTests",
-            dependencies: ["CCApp", "CCModels", "CCNetworking"],
+            dependencies: ["CCApp", "CCModels", "CCNetworking", "CCLog"],
             path: "Tests/CCAppTests"
         ),
     ]

@@ -1,8 +1,8 @@
 import Foundation
-import OSLog
+import CCLog
 import CCModels
 
-private let log = Logger(subsystem: "com.cc-commander.app", category: "WebSocketClient")
+private let log = CCLog.Logger("WebSocketClient")
 
 /// Production WebSocket client wrapping URLSessionWebSocketTask.
 public actor WebSocketClient: WebSocketClientProtocol {
@@ -19,7 +19,7 @@ public actor WebSocketClient: WebSocketClientProtocol {
     }
 
     public func connect(request: URLRequest) async throws {
-        log.info("connect: creating ws task for \(request.url?.absoluteString ?? "?", privacy: .public)")
+        log.info("connect: creating ws task", ["url": .string(request.url?.absoluteString ?? "?")])
         let task = session.webSocketTask(with: request)
         task.resume()
 
@@ -56,7 +56,11 @@ public actor WebSocketClient: WebSocketClientProtocol {
             timer.cancel()
             let closeCode = task.closeCode
             task.cancel()
-            log.error("connect: failed state=\(task.state.rawValue, privacy: .public) close=\(closeCode.rawValue, privacy: .public) err=\(String(describing: error), privacy: .public)")
+            log.error("connect: failed", [
+                "state": .int(task.state.rawValue),
+                "closeCode": .int(closeCode.rawValue),
+                "error": .string(String(describing: error)),
+            ])
             if closeCode.rawValue == 4001 {
                 throw WebSocketError.authRejected
             }
@@ -73,7 +77,7 @@ public actor WebSocketClient: WebSocketClientProtocol {
         // but this guard avoids the log noise and tearing down a healthy
         // connection if the timer fires a nanosecond after success.
         guard self.task !== task else { return }
-        log.error("connect: \(reason, privacy: .public); cancelling ws task")
+        log.error("connect: cancelling ws task", ["reason": .string(reason)])
         task.cancel()
     }
 
@@ -89,6 +93,7 @@ public actor WebSocketClient: WebSocketClientProtocol {
             throw WebSocketError.notConnected
         }
         let data = try encoder.encode(message)
+        log.debug("ws send", ["bytes": .int(data.count)])
         try await task.send(.data(data))
     }
 

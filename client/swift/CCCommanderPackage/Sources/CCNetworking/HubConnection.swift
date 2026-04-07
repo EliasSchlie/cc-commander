@@ -1,10 +1,10 @@
 import Foundation
-import OSLog
+import CCLog
 import CCModels
 
-/// Unified-log logger for HubConnection. Stream from the terminal with:
-///     log stream --predicate 'subsystem == "com.cc-commander.app"' --level debug
-private let log = Logger(subsystem: "com.cc-commander.app", category: "HubConnection")
+/// Logging routes through `CCLog` so the same line lands in `os.Logger`
+/// (Console.app, `log stream`) AND in the JSON file sink test harnesses tail.
+private let log = CCLog.Logger("HubConnection")
 
 /// Connection state machine for the hub.
 public enum HubConnectionState: Sendable, Equatable {
@@ -67,7 +67,7 @@ public final class HubConnection {
     // MARK: - Auth
 
     public func login(email: String, password: String) async throws {
-        log.info("login start email=\(email, privacy: .public)")
+        log.info("login start", ["email": .string(email)])
         do {
             let tokens = try await authClient.login(email: email, password: password)
             log.info("login REST ok, saving tokens")
@@ -75,7 +75,7 @@ public final class HubConnection {
             try await connectWebSocket(token: tokens.token)
             log.info("login complete, ws connected")
         } catch {
-            log.error("login failed: \(String(describing: error), privacy: .public)")
+            log.error("login failed", ["error": .string(String(describing: error))])
             throw error
         }
     }
@@ -95,7 +95,7 @@ public final class HubConnection {
             log.info("connectWithStoredTokens: no jwt in keychain")
             throw HubConnectionError.noStoredTokens
         }
-        log.info("connectWithStoredTokens: jwt found len=\(token.count, privacy: .public), connecting ws")
+        log.info("connectWithStoredTokens: jwt found, connecting ws", ["jwtLen": .int(token.count)])
         do {
             try await connectWebSocket(token: token)
             log.info("connectWithStoredTokens: ws connected with stored jwt")
@@ -110,7 +110,7 @@ public final class HubConnection {
             try await connectWebSocket(token: tokens.token)
             log.info("connectWithStoredTokens: ws connected with refreshed jwt")
         } catch {
-            log.error("connectWithStoredTokens: ws connect failed: \(String(describing: error), privacy: .public)")
+            log.error("connectWithStoredTokens: ws connect failed", ["error": .string(String(describing: error))])
             throw error
         }
     }
@@ -201,7 +201,7 @@ public final class HubConnection {
     }
 
     private func connectWebSocket(token: String) async throws {
-        log.info("connectWebSocket: building url from baseURL=\(self.baseURL.absoluteString, privacy: .public)")
+        log.info("connectWebSocket: building url", ["baseURL": .string(baseURL.absoluteString)])
         state = .connecting
         shouldReconnect = true
         reconnectDelay = 1.0
@@ -220,7 +220,7 @@ public final class HubConnection {
             state = .disconnected
             throw HubConnectionError.invalidURL
         }
-        log.info("connectWebSocket: connecting to \(wsURL.absoluteString, privacy: .public)")
+        log.info("connectWebSocket: connecting", ["url": .string(wsURL.absoluteString)])
 
         var request = URLRequest(url: wsURL)
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
@@ -230,7 +230,7 @@ public final class HubConnection {
             try await ws.connect(request: request)
             log.info("connectWebSocket: ws.connect returned ok")
         } catch {
-            log.error("connectWebSocket: ws.connect threw \(String(describing: error), privacy: .public)")
+            log.error("connectWebSocket: ws.connect threw", ["error": .string(String(describing: error))])
             // Connect failed -- don't store the leaked client, restore state
             state = .disconnected
             throw error
@@ -248,13 +248,13 @@ public final class HubConnection {
             let stream = await ws.messages()
             do {
                 for try await msg in stream {
-                    log.debug("ws message received: \(String(describing: msg), privacy: .public)")
+                    log.debug("ws message received", ["msg": .string(String(describing: msg))])
                     self?.messageContinuation?.yield(msg)
                 }
                 log.info("ws message stream ended cleanly")
                 self?.handleDisconnect()
             } catch {
-                log.error("ws message stream threw: \(String(describing: error), privacy: .public)")
+                log.error("ws message stream threw", ["error": .string(String(describing: error))])
                 self?.handleDisconnect()
             }
         }
