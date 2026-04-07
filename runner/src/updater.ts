@@ -13,6 +13,8 @@
  * string. That is the local-dev case: a hand-started runner against a
  * locally-started hub should never auto-restart itself.
  */
+import { createLogger, type Logger } from "@cc-commander/protocol/logger";
+
 export interface UpdaterConfig {
   hubBaseUrl: string;
   currentVersion: string;
@@ -20,6 +22,8 @@ export interface UpdaterConfig {
   onUpdateNeeded: (hubVersion: string) => Promise<void> | void;
   /** Override fetch for tests. */
   fetchFn?: typeof fetch;
+  /** Inject a Logger (mostly for tests). */
+  logger?: Logger;
 }
 
 const DEFAULT_POLL_INTERVAL_MS = 5 * 60 * 1000;
@@ -31,23 +35,28 @@ export class Updater {
   private fetchFn: typeof fetch;
   private versionUrl: string;
 
+  private log: Logger;
+
   constructor(config: UpdaterConfig) {
     this.config = config;
     this.fetchFn = config.fetchFn ?? fetch;
     this.versionUrl = new URL("/api/version", config.hubBaseUrl).toString();
+    this.log = config.logger ?? createLogger("updater");
   }
 
   start(): void {
     if (!this.config.currentVersion) {
-      console.log(
-        "[updater] runner version unknown (no git checkout?); self-update disabled",
-      );
+      this.log.info("runner version unknown; self-update disabled", {
+        hint: "no git checkout?",
+      });
       return;
     }
     this.stopped = false;
-    console.log(
-      `[updater] polling ${this.versionUrl} every ${this.intervalMs() / 1000}s (current=${this.config.currentVersion})`,
-    );
+    this.log.info("polling for updates", {
+      url: this.versionUrl,
+      intervalSec: this.intervalMs() / 1000,
+      currentVersion: this.config.currentVersion,
+    });
     this.scheduleNext();
   }
 
@@ -68,11 +77,11 @@ export class Updater {
     try {
       res = await this.fetchFn(this.versionUrl);
     } catch (err) {
-      console.error(`[updater] /api/version request failed: ${String(err)}`);
+      this.log.error("version request failed", { err: err as Error });
       return "skipped";
     }
     if (!res.ok) {
-      console.error(`[updater] /api/version returned HTTP ${res.status}`);
+      this.log.error("version returned non-2xx", { status: res.status });
       return "skipped";
     }
     let hubVersion: string;
@@ -80,14 +89,12 @@ export class Updater {
       const data = (await res.json()) as { version?: unknown };
       hubVersion = typeof data.version === "string" ? data.version : "";
       if (typeof data.version !== "string") {
-        console.warn(
-          `[updater] /api/version body has no string "version" field; got ${typeof data.version}`,
-        );
+        this.log.warn("version body missing string version field", {
+          got: typeof data.version,
+        });
       }
     } catch (err) {
-      console.error(
-        `[updater] /api/version returned non-JSON body: ${String(err)}`,
-      );
+      this.log.error("version returned non-JSON body", { err: err as Error });
       return "skipped";
     }
 
@@ -96,13 +103,14 @@ export class Updater {
     if (!hubVersion) return "skipped";
     if (hubVersion === this.config.currentVersion) return "matched";
 
-    console.log(
-      `[updater] version mismatch: runner=${this.config.currentVersion} hub=${hubVersion}; updating...`,
-    );
+    this.log.info("version mismatch -- updating", {
+      runner: this.config.currentVersion,
+      hub: hubVersion,
+    });
     try {
       await this.config.onUpdateNeeded(hubVersion);
     } catch (err) {
-      console.error(`[updater] update handler failed: ${String(err)}`);
+      this.log.error("update handler failed", { err: err as Error });
     }
     return "update";
   }
@@ -114,7 +122,7 @@ export class Updater {
       try {
         await this.checkOnce();
       } catch (err) {
-        console.error(`[updater] check failed: ${String(err)}`);
+        this.log.error("check failed", { err: err as Error });
       }
       this.scheduleNext();
     }, this.intervalMs());

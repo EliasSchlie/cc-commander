@@ -9,6 +9,7 @@ import {
 } from "@cc-commander/protocol";
 import type { HubToRunnerMsg, HubToClientMsg } from "@cc-commander/protocol";
 import { HUB_METRIC, Metrics } from "@cc-commander/protocol/metrics";
+import { createLogger, type Logger } from "@cc-commander/protocol/logger";
 import type { HubDb } from "./db.ts";
 import type { AuthService, JwtPayload } from "./auth.ts";
 import { TokenBucketRateLimiter } from "./rate_limit.ts";
@@ -17,7 +18,8 @@ import type { ClientConnection, RunnerConnection } from "./ws/types.ts";
 import { handleAuthEndpoint, handleRefreshEndpoint } from "./routes/auth.ts";
 import { handleCreateMachine } from "./routes/machines.ts";
 import { handleHealth, handleVersion } from "./routes/health.ts";
-import type { RouteContext } from "./routes/types.ts";
+import { handleDebugState } from "./routes/debug.ts";
+import type { DebugSnapshot, RouteContext } from "./routes/types.ts";
 import { clientIp, extractBearerToken } from "./util/http.ts";
 import {
   handleClientMessage,
@@ -71,6 +73,18 @@ export interface HubConfig {
    * unset and get the default 60s flush to console.log.
    */
   metrics?: Metrics;
+  /**
+   * Inject a Logger (mostly for tests, which want to capture log lines
+   * for assertions). Production callers leave this unset and get the
+   * shared default logger from @cc-commander/protocol/logger.
+   */
+  logger?: Logger;
+  /**
+   * ISO8601 timestamp of when the hub was started. Used by
+   * /api/debug/state to report uptime; if unset, the Hub stamps its
+   * own start time inside the constructor.
+   */
+  startedAt?: string;
 }
 
 export class Hub {
@@ -101,8 +115,12 @@ export class Hub {
    */
   private limiters: TokenBucketRateLimiter[];
   metrics: Metrics;
+  log: Logger;
+  readonly startedAt: string;
 
   constructor(config: HubConfig) {
+    this.log = config.logger ?? createLogger("hub");
+    this.startedAt = config.startedAt ?? new Date().toISOString();
     this.config = config;
     this.clients = new Map();
     this.clientsByAccount = new Map();
@@ -235,6 +253,7 @@ export class Hub {
       auth: this.config.auth,
       db: this.config.db,
       metrics: this.metrics,
+      log: this.log,
       loginLimiter: this.loginLimiter,
       registerLimiter: this.registerLimiter,
       refreshLimiter: this.refreshLimiter,
@@ -242,6 +261,37 @@ export class Hub {
       machineCreateIpLimiter: this.machineCreateIpLimiter,
       broadcastMachineList: (accountId) => this.broadcastMachineList(accountId),
       version: this.config.version ?? "",
+      // Debug endpoint reads live state directly off the Hub. Closure
+      // (rather than passing the Hub class) keeps routes/ from
+      // depending on hub.ts; see RouteContext jsdoc.
+      debugSnapshot: () => this.debugSnapshot(),
+    };
+  }
+
+  /**
+   * Live snapshot of hub state for /api/debug/state. Counts only --
+   * never returns auth tokens, registration tokens, account ids, or
+   * any per-user content. Designed to be safe to surface to anyone who
+   * already has a hub-issued JWT.
+   */
+  debugSnapshot(): DebugSnapshot {
+    return {
+      version: this.config.version ?? "",
+      startedAt: this.startedAt,
+      uptimeSec: Math.round(process.uptime()),
+      pid: process.pid,
+      port: this.config.port,
+      runners: {
+        count: this.runners.size,
+        machineIds: Array.from(this.runners.keys()),
+      },
+      clients: {
+        count: this.clients.size,
+        accounts: this.clientsByAccount.size,
+      },
+      pendingHistory: this.pendingHistory.size,
+      memory: process.memoryUsage(),
+      metrics: this.metrics.snapshot(),
     };
   }
 
@@ -270,6 +320,9 @@ export class Hub {
     }
     if (req.method === "GET" && url.pathname === "/api/version") {
       return handleVersion(ctx, req, res);
+    }
+    if (req.method === "GET" && url.pathname === "/api/debug/state") {
+      return handleDebugState(ctx, req, res);
     }
 
     res.writeHead(404);
@@ -320,6 +373,10 @@ export class Hub {
       email: payload.email,
     };
     this.addClient(connectionId, conn);
+    this.log.info("client connected", {
+      connectionId,
+      accountId: payload.accountId,
+    });
 
     const wsCtx = this.wsContext();
     handleListSessions(wsCtx, conn);
@@ -341,6 +398,10 @@ export class Hub {
     ws.on("close", () => {
       this.removeClient(connectionId, conn);
       this.pendingHistory.dropMatching((entry) => entry.conn === conn);
+      this.log.info("client disconnected", {
+        connectionId,
+        accountId: payload.accountId,
+      });
     });
   }
 
@@ -392,6 +453,11 @@ export class Hub {
     this.runners.set(machine.id, conn);
     this.config.db.updateMachineLastSeen(machine.id);
     this.broadcastMachineList(machine.accountId);
+    this.log.info("runner connected", {
+      machineId: machine.id,
+      machineName: machine.name,
+      accountId: machine.accountId,
+    });
 
     ws.on("message", (data) => {
       try {
@@ -399,7 +465,10 @@ export class Hub {
         handleRunnerMessage(this.wsContext(), conn, msg);
       } catch (err) {
         this.metrics.inc(HUB_METRIC.PARSE_REJECT, { source: "runner" });
-        console.error("Invalid runner message:", err);
+        this.log.error("invalid runner message", {
+          machineId: machine.id,
+          err: err as Error,
+        });
       }
     });
 
@@ -418,6 +487,12 @@ export class Hub {
         if (affected > 0) {
           this.broadcastSessionList(machine.accountId);
         }
+        this.log.info("runner disconnected", {
+          machineId: machine.id,
+          machineName: machine.name,
+          accountId: machine.accountId,
+          sessionsErrored: affected,
+        });
       }
     });
   }
@@ -433,6 +508,7 @@ export class Hub {
     return {
       db: this.config.db,
       metrics: this.metrics,
+      log: this.log,
       pendingHistory: this.pendingHistory,
       runners: this.runners,
       sendToClient: (conn, msg) => this.sendToClient(conn, msg),

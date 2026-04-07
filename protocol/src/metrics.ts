@@ -92,13 +92,26 @@ export class Metrics {
   /** Emit a single JSON snapshot line. Public so callers can flush on demand. */
   flush(): void {
     if (this.counters.size === 0) return;
-    this.emit(
-      JSON.stringify({
-        ts: new Date(this.now()).toISOString(),
-        kind: "metrics",
-        counters: this.snapshot(),
-      }),
-    );
+    const line = JSON.stringify({
+      ts: new Date(this.now()).toISOString(),
+      kind: "metrics",
+      counters: this.snapshot(),
+    });
+    try {
+      this.emit(line);
+    } catch (err) {
+      // Surface a broken sink instead of silently swallowing snapshots.
+      // A flush failure used to vanish; now it lands on stderr at
+      // least once per failure interval so an operator (or CC session
+      // tailing logs) sees it.
+      try {
+        process.stderr.write(
+          `[metrics] flush failed: ${(err as Error).message}\n`,
+        );
+      } catch {
+        /* swallow -- absolute last resort */
+      }
+    }
   }
 }
 

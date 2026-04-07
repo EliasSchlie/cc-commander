@@ -5,7 +5,8 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
-    "./metrics": "./src/metrics.ts"
+    "./metrics": "./src/metrics.ts",
+    "./logger": "./src/logger.ts"
   },
   "scripts": {
     "test": "node --test --experimental-strip-types 'src/__tests__/*.test.ts'",

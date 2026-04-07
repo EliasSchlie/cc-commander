@@ -14,6 +14,7 @@ import type {
   MachineInfo,
 } from "@cc-commander/protocol";
 import type { Metrics } from "@cc-commander/protocol/metrics";
+import type { Logger } from "@cc-commander/protocol/logger";
 import type { HubDb } from "../db.ts";
 import type { PendingHistoryStore } from "../state/pendingHistory.ts";
 import type { ClientConnection, RunnerConnection } from "./types.ts";
@@ -21,6 +22,7 @@ import type { ClientConnection, RunnerConnection } from "./types.ts";
 export interface WsContext {
   db: HubDb;
   metrics: Metrics;
+  log: Logger;
   pendingHistory: PendingHistoryStore;
   /** Live runner connections, keyed by machineId. Used by message
    *  dispatchers to find the runner for a session and to compute the

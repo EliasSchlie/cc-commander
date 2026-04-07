@@ -10,8 +10,11 @@ import { spawn, spawnSync } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { homedir, hostname } from "node:os";
+import { createLogger } from "@cc-commander/protocol/logger";
 import { MachineRunner } from "./runner.ts";
 import { Updater } from "./updater.ts";
+
+const log = createLogger("runner");
 
 interface RunnerFileConfig {
   hubUrl: string;
@@ -25,32 +28,29 @@ const DEFAULT_CONFIG_PATH =
 
 function readConfig(path: string): RunnerFileConfig {
   if (!existsSync(path)) {
-    console.error(
-      `[runner] no config at ${path}\n` +
-        `  Run:  cc-commander-runner register --hub <url> --email <you@example.com> --name <machine-name>\n` +
-        `  Or write the file by hand: { "hubUrl": "...", "registrationToken": "...", "machineName": "..." }`,
-    );
+    log.error("no config", {
+      path,
+      hint: "Run `cc-commander-runner register --hub <url> --email <email> --name <name>`",
+    });
     process.exit(1);
   }
   let raw: string;
   try {
     raw = readFileSync(path, "utf8");
   } catch (err) {
-    console.error(`[runner] failed to read ${path}: ${(err as Error).message}`);
+    log.error("failed to read config", { path, err: err as Error });
     process.exit(1);
   }
   let parsed: any;
   try {
     parsed = JSON.parse(raw);
   } catch (err) {
-    console.error(
-      `[runner] config is not valid JSON: ${(err as Error).message}`,
-    );
+    log.error("config is not valid JSON", { path, err: err as Error });
     process.exit(1);
   }
   for (const key of ["hubUrl", "registrationToken", "machineName"] as const) {
     if (typeof parsed[key] !== "string" || !parsed[key]) {
-      console.error(`[runner] config missing required string field: ${key}`);
+      log.error("config missing required string field", { key });
       process.exit(1);
     }
   }
@@ -123,42 +123,44 @@ async function cmdRegister(
   const configPath = String(flags.config ?? DEFAULT_CONFIG_PATH);
 
   if (!hubUrl || !email) {
-    console.error(
-      "Usage: cc-commander-runner register --hub <https://hub.example.com> --email <you@example.com> [--name <machine-name>] [--password <pw>] [--config <path>]",
+    log.error(
+      "usage: register --hub <url> --email <email> [--name <name>] [--password <pw>] [--config <path>]",
     );
     process.exit(1);
   }
   if (!hubUrl.startsWith("http://") && !hubUrl.startsWith("https://")) {
-    console.error("[runner] --hub must be an http(s) URL");
+    log.error("--hub must be an http(s) URL", { hubUrl });
     process.exit(1);
   }
 
   const password = passwordArg ?? (await readPasswordFromTty("Hub password: "));
   if (!password) {
-    console.error("[runner] password required");
+    log.error("password required");
     process.exit(1);
   }
 
-  console.log(`[runner] logging in to ${hubUrl} as ${email}...`);
+  log.info("logging in", { hubUrl, email });
   const login = await postJson(`${hubUrl}/api/auth/login`, { email, password });
   if (login.status !== 200 || !login.data?.token) {
-    console.error(
-      `[runner] login failed (HTTP ${login.status}): ${login.data?.error ?? "unknown"}`,
-    );
+    log.error("login failed", {
+      status: login.status,
+      error: login.data?.error ?? "unknown",
+    });
     process.exit(1);
   }
   const jwt = login.data.token as string;
 
-  console.log(`[runner] creating machine "${name}"...`);
+  log.info("creating machine", { name });
   const create = await postJson(
     `${hubUrl}/api/machines`,
     { name },
     { Authorization: `Bearer ${jwt}` },
   );
   if (create.status !== 201 || !create.data?.registrationToken) {
-    console.error(
-      `[runner] machine create failed (HTTP ${create.status}): ${create.data?.error ?? "unknown"}`,
-    );
+    log.error("machine create failed", {
+      status: create.status,
+      error: create.data?.error ?? "unknown",
+    });
     process.exit(1);
   }
 
@@ -168,9 +170,8 @@ async function cmdRegister(
     machineName: name,
   };
   writeConfig(configPath, cfg);
-  console.log(`[runner] wrote ${configPath}`);
-  console.log(`[runner] machineId=${create.data.machineId}`);
-  console.log(`[runner] start the runner with:  cc-commander-runner run`);
+  log.info("wrote config", { configPath, machineId: create.data.machineId });
+  log.info("start the runner with: cc-commander-runner run");
 }
 
 // src/cli.ts → src → runner
@@ -201,15 +202,15 @@ function detectRunnerVersion(): string {
     stdio: ["ignore", "pipe", "ignore"],
   });
   if (result.error) {
-    console.warn(
-      `[runner] could not detect git version (${result.error.message}); self-update disabled`,
-    );
+    log.warn("could not detect git version; self-update disabled", {
+      error: result.error.message,
+    });
     return "";
   }
   if (result.status !== 0) {
-    console.warn(
-      `[runner] git rev-parse exited ${result.status}; self-update disabled`,
-    );
+    log.warn("git rev-parse failed; self-update disabled", {
+      status: result.status,
+    });
     return "";
   }
   return result.stdout.trim();
@@ -219,9 +220,34 @@ async function cmdRun(flags: Record<string, string | boolean>): Promise<void> {
   const configPath = String(flags.config ?? DEFAULT_CONFIG_PATH);
   const cfg = readConfig(configPath);
   const currentVersion = detectRunnerVersion();
-  console.log(
-    `[runner] starting "${cfg.machineName}" → ${cfg.hubUrl} (config=${configPath}, version=${currentVersion || "<unknown>"})`,
-  );
+  const dryRun = !!flags["dry-run"];
+  if (dryRun) {
+    // Validate-only mode: prove config + hub reachability, then exit.
+    // Lets a Claude Code session verify a runner is correctly set up
+    // before launching the long-lived process under launchd.
+    log.info("dry-run: validating config and hub reachability", {
+      configPath,
+      machineName: cfg.machineName,
+      hubUrl: cfg.hubUrl,
+      version: currentVersion || null,
+    });
+    const httpUrl = swapWsHttp(cfg.hubUrl, "http");
+    try {
+      const res = await fetch(`${httpUrl}/api/health`);
+      log.info("hub reachable", { status: res.status });
+    } catch (err) {
+      log.error("hub unreachable", { url: httpUrl, err: err as Error });
+      process.exit(1);
+    }
+    log.info("dry-run validation passed");
+    process.exit(0);
+  }
+  log.info("starting runner", {
+    machineName: cfg.machineName,
+    hubUrl: cfg.hubUrl,
+    configPath,
+    version: currentVersion || null,
+  });
   const runner = new MachineRunner({
     hubUrl: cfg.hubUrl,
     registrationToken: cfg.registrationToken,
@@ -248,9 +274,11 @@ async function cmdRun(flags: Record<string, string | boolean>): Promise<void> {
       const ageMs = Date.now() - st.mtimeMs;
       if (ageMs < UPDATE_COOLDOWN_MS) {
         const minsLeft = Math.ceil((UPDATE_COOLDOWN_MS - ageMs) / 60000);
-        console.warn(
-          `[updater] previous update failed ${Math.floor(ageMs / 60000)}m ago; cooldown for ${minsLeft}m more (delete ${updateFailureMarker} to retry sooner)`,
-        );
+        log.warn("previous update failed; in cooldown", {
+          agoMin: Math.floor(ageMs / 60000),
+          coolingDownMin: minsLeft,
+          marker: updateFailureMarker,
+        });
         return true;
       }
     } catch {
@@ -270,7 +298,7 @@ async function cmdRun(flags: Record<string, string | boolean>): Promise<void> {
       if (shouldSkipUpdate()) return;
 
       const script = join(RUNNER_REPO_DIR, "scripts", "update.sh");
-      console.log(`[updater] running ${script} → ${hubVersion}`);
+      log.info("running update script", { script, hubVersion });
       const child = spawn("/bin/sh", [script, hubVersion], {
         cwd: RUNNER_REPO_DIR,
         detached: true,
@@ -281,13 +309,11 @@ async function cmdRun(flags: Record<string, string | boolean>): Promise<void> {
       // after our process.exit, so we'd never see it. Bail loudly here
       // instead — the runner stays up, the operator sees the error.
       if (!child.pid) {
-        console.error(
-          "[updater] failed to spawn update script (no pid); aborting update",
-        );
+        log.error("failed to spawn update script (no pid); aborting update");
         return;
       }
       child.unref();
-      console.log("[updater] exiting for launchd restart");
+      log.info("exiting for launchd restart");
       runner.disconnect();
       process.exit(0);
     },
@@ -297,7 +323,7 @@ async function cmdRun(flags: Record<string, string | boolean>): Promise<void> {
   function shutdown(signal: string): void {
     if (shuttingDown) return;
     shuttingDown = true;
-    console.log(`[runner] received ${signal}, shutting down...`);
+    log.info("shutdown begin", { signal });
     if (reconnectTimer !== null) {
       clearTimeout(reconnectTimer);
       reconnectTimer = null;
@@ -312,30 +338,106 @@ async function cmdRun(flags: Record<string, string | boolean>): Promise<void> {
   try {
     await runner.connect();
   } catch (err) {
-    console.error(`[runner] initial connect failed: ${String(err)}`);
-    console.error("[runner] will retry in 5s...");
+    log.error("initial connect failed", { err: err as Error });
+    log.warn("will retry in 5s");
     reconnectTimer = setTimeout(() => {
       reconnectTimer = null;
-      runner.connect().catch((e) => console.error(String(e)));
+      runner
+        .connect()
+        .catch((e) => log.error("reconnect failed", { err: e as Error }));
     }, 5000);
   }
 
   updater.start();
 }
 
+/**
+ * `cc-commander-runner status` -- prints the resolved config, the
+ * detected runner version, hub reachability, and (if a JWT is in
+ * $HUB_DEBUG_TOKEN) the hub's /api/debug/state slice for this runner's
+ * machineId. Designed so a Claude Code session can answer "is this
+ * runner registered, can it reach the hub, what's the hub seeing"
+ * without having to start the long-lived process.
+ */
+async function cmdStatus(
+  flags: Record<string, string | boolean>,
+): Promise<void> {
+  // readConfig handles the missing-file case (and TOCTOU): no need
+  // for a redundant existsSync probe before it.
+  const configPath = String(flags.config ?? DEFAULT_CONFIG_PATH);
+  const cfg = readConfig(configPath);
+  const currentVersion = detectRunnerVersion();
+  log.info("runner config", {
+    configPath,
+    machineName: cfg.machineName,
+    hubUrl: cfg.hubUrl,
+    version: currentVersion || null,
+    pid: process.pid,
+  });
+  const httpUrl = swapWsHttp(cfg.hubUrl, "http");
+  try {
+    const res = await fetch(`${httpUrl}/api/health`);
+    log.info("hub health", {
+      url: `${httpUrl}/api/health`,
+      status: res.status,
+    });
+  } catch (err) {
+    log.error("hub health unreachable", { url: httpUrl, err: err as Error });
+  }
+  try {
+    const res = await fetch(`${httpUrl}/api/version`);
+    const text = await res.text();
+    log.info("hub version", { status: res.status, body: text });
+  } catch (err) {
+    log.error("hub version unreachable", { err: err as Error });
+  }
+  const debugToken = process.env.HUB_DEBUG_TOKEN;
+  if (debugToken) {
+    try {
+      const res = await fetch(`${httpUrl}/api/debug/state`, {
+        headers: { Authorization: `Bearer ${debugToken}` },
+      });
+      const text = await res.text();
+      log.info("hub debug state", {
+        status: res.status,
+        body: text.slice(0, 4000),
+      });
+    } catch (err) {
+      log.error("hub debug state failed", { err: err as Error });
+    }
+  } else {
+    log.info("debug state skipped", {
+      hint: "set HUB_DEBUG_TOKEN to a valid JWT to fetch /api/debug/state",
+    });
+  }
+}
+
 function usage(): void {
-  console.log(
+  // Plain stdout (not the structured logger): humans run --help.
+  process.stdout.write(
     [
       "cc-commander-runner — runs Claude Code sessions on this machine",
       "",
       "Commands:",
       "  register --hub <url> --email <email> [--name <name>] [--password <pw>] [--config <path>]",
       "      Log into the hub and create a machine; writes config file with the registration token.",
-      "  run [--config <path>]",
+      "  run [--config <path>] [--dry-run]",
       "      Connect to the hub and serve sessions. Reconnects on disconnect.",
+      "      --dry-run validates config + hub reachability and exits 0 without serving.",
+      "  status [--config <path>]",
+      "      Print resolved config, runner version, and hub /health + /version.",
+      "      Set HUB_DEBUG_TOKEN to also fetch /api/debug/state.",
       "",
       `Default config path: ${DEFAULT_CONFIG_PATH}`,
       "Override with --config or the CC_COMMANDER_CONFIG env var.",
+      "",
+      "Logging env vars (shared with hub):",
+      "  LOG_LEVEL=debug|info|warn|error  (default: info)",
+      "  LOG_FORMAT=json|text             (default: text in TTY, json otherwise)",
+      "  LOG_FILE=<path>                  (also tee logs to a rotating file)",
+      "  LOG_MAX_BYTES=<n>                (rotation threshold, default 10MB)",
+      "  LOG_MAX_FILES=<n>                (rotation depth, default 5)",
+      "",
     ].join("\n"),
   );
 }
@@ -351,8 +453,10 @@ if (!sub || sub === "--help" || sub === "-h" || sub === "help") {
   await cmdRegister(flags);
 } else if (sub === "run") {
   await cmdRun(flags);
+} else if (sub === "status") {
+  await cmdStatus(flags);
 } else {
-  console.error(`Unknown command: ${sub}`);
+  log.error("unknown command", { sub });
   usage();
   process.exit(1);
 }

@@ -34,17 +34,21 @@ export function handleRunnerMessage(
         // runner. Either way: do not broadcast unsolicited history to
         // every client on the account.
         ctx.metrics.inc(HUB_METRIC.HISTORY_ORPHAN_REPLY);
-        console.warn(
-          `[hub] dropping session_history with unknown requestId from machine ${conn.machineId}`,
-        );
+        ctx.log.warn("dropping session_history with unknown requestId", {
+          machineId: conn.machineId,
+          requestId: msg.requestId,
+          sessionId: msg.sessionId,
+        });
         break;
       }
       if (pending.machineId !== conn.machineId) {
         // The runner that replied isn't the one we asked. Drop.
         ctx.metrics.inc(HUB_METRIC.HISTORY_ORPHAN_REPLY);
-        console.warn(
-          `[hub] session_history reply machineId mismatch (expected ${pending.machineId}, got ${conn.machineId})`,
-        );
+        ctx.log.warn("session_history reply machineId mismatch", {
+          expected: pending.machineId,
+          got: conn.machineId,
+          requestId: msg.requestId,
+        });
         break;
       }
       ctx.pendingHistory.take(msg.requestId);
@@ -90,9 +94,16 @@ export function handleRunnerMessage(
         block_type: msg.blockType,
         reason: msg.reason,
       });
-      console.warn(
-        `[hub] dropped_tool_block machine=${conn.machineId} session=${msg.sessionId} block=${msg.blockType} reason=${msg.reason}`,
-      );
+      // ERROR (not warn): SDK shape drift means the runner just failed
+      // to forward a real tool exchange to the client. The session will
+      // appear to silently skip an action -- exactly the kind of
+      // failure that wastes hours when surfaced as a low-priority log.
+      ctx.log.error("dropped_tool_block", {
+        machineId: conn.machineId,
+        sessionId: msg.sessionId,
+        blockType: msg.blockType,
+        reason: msg.reason,
+      });
       break;
   }
 }
