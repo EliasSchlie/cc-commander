@@ -157,61 +157,38 @@ jobs:
         uses: appleboy/ssh-action@v1.2.0
         env:
           DEPLOY_HUB_DIR: ${{ secrets.DEPLOY_HUB_DIR }}
-          NEW_VERSION: ${{ needs.hub-image.outputs.version }}
         with:
           host: ${{ secrets.DEPLOY_SSH_HOST }}
           username: ${{ secrets.DEPLOY_SSH_USER }}
           key: ${{ secrets.DEPLOY_SSH_KEY }}
           port: ${{ secrets.DEPLOY_SSH_PORT || 22 }}
-          # 5 minute window: covers a cold rebuild incl. npm ci.
-          # Hub builds in ~90s on a typical VPS so this is generous.
-          command_timeout: 5m
-          # Pass NEW_VERSION + DEPLOY_HUB_DIR through to the remote
-          # shell so they aren't substituted into the script body
-          # (keeps them out of CI logs even if logging the script is
-          # later enabled).
-          envs: DEPLOY_HUB_DIR,NEW_VERSION
+          # 4 minute window. Image pull is the long pole on cold or
+          # slow VPS links (Node base + hub layer ~ a few hundred MB).
+          command_timeout: 4m
+          # Substitute DEPLOY_HUB_DIR via the remote shell, not the
+          # script body, to keep it out of CI logs.
+          envs: DEPLOY_HUB_DIR
           script: |
             set -euo pipefail
             HUB_DIR="${DEPLOY_HUB_DIR:-$HOME/cc-commander/hub}"
             cd "$HUB_DIR"
 
-            # `git reset --hard origin/main` (not `pull`) so a deploy
-            # always lands the exact tree CI just built. A merged PR
-            # may have conflicting local changes if an operator was
-            # poking around on the box; refuse to silently merge
-            # those into prod.
+            # Refresh docker-compose.yml -- the only repo file the
+            # deploy reads. Reset --hard, not pull, so operator
+            # hand-edits on the box never silently merge into prod.
             git fetch origin main
             git reset --hard origin/main
 
-            # docker-compose.yml passes VERSION through to the
-            # container's runtime env (`VERSION: ${VERSION:-}`), and
-            # /api/version reports whatever the container sees at
-            # runtime -- NOT the value the Dockerfile baked in at
-            # build time. So we have to update .env so docker compose
-            # picks up the new SHA, otherwise the post-deploy verify
-            # step polls forever for a SHA the container will never
-            # report.
-            #
-            # Idempotent: replace existing VERSION= line, or append if
-            # missing. The sed delimiter is `|` (not `/`) so a SHA
-            # never collides with the delimiter.
-            if grep -q '^VERSION=' .env; then
-                sed -i.bak "s|^VERSION=.*|VERSION=${NEW_VERSION}|" .env
-            else
-                echo "VERSION=${NEW_VERSION}" >> .env
-            fi
-            rm -f .env.bak
+            # Pull the :main image CI just pushed; compose detects
+            # the new digest and recreates the hub container on
+            # `up -d`. No source build happens on the VPS.
+            docker compose pull
+            docker compose up -d
 
-            # `--build` (not `pull`) is intentional: the compose file
-            # uses a `build:` directive. Layer cache makes the rebuild
-            # fast. `--force-recreate` so the container picks up the
-            # new VERSION env from .env even when the image hash
-            # didn't change (e.g. doc-only commits).
-            docker compose up -d --build --force-recreate
-
-            # Tear down dangling layers so a long-running VPS doesn't
-            # accumulate one stale image per deploy.
+            # Host-wide prune (docker has no per-stack scope). Safe
+            # because dangling = unreferenced; if another stack on
+            # this VPS just pulled and hasn't recreated yet, its old
+            # image is still tagged and survives the prune.
             docker image prune -f
 
       - name: Verify deployed VERSION

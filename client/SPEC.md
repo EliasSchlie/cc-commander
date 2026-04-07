@@ -9,11 +9,11 @@ The CC Commander client app. Runs on iOS, macOS, and later as a web app.
 
 ## Session picker
 
-- Shows all sessions, ordered by last activity
+- Shows all non-archived sessions, ordered by last activity
 - Each entry: machine name, directory, status (running / idle / waiting for input / error), last activity, preview of last message
 - Filters: by machine, by directory, by status. More filters later.
-- **Mac**: sidebar on the left, active session on the right
-- **iPhone**: session list as main view, tap to open full-screen, back to return
+- **Mac**: sidebar on the left, active session on the right; right-click a row → **Archive** removes it from the picker (the row stays in the hub for post-mortem queries)
+- **iPhone**: session list as main view, tap to open full-screen, back to return; swipe a row left → **Archive**
 
 ## Session view
 
@@ -31,6 +31,13 @@ The CC Commander client app. Runs on iOS, macOS, and later as a web app.
 3. Pick or type a directory
 4. Optionally configure session settings (available tools, max turns, max budget, etc.)
 5. Type your prompt
+
+## Error feedback
+
+Hub-side errors (offline machine, invalid directory, "session not found",
+…) surface as a modal alert at the root view. Without this surface they
+were silently dropped, and any failed action looked to the user like
+"nothing happened".
 
 ## Multi-device
 
