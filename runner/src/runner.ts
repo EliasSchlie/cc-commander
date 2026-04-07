@@ -153,6 +153,9 @@ export class MachineRunner {
   }
 
   private handleMessage(msg: HubToRunnerMsg): void {
+    console.log(
+      `[runner] handleMessage type=${msg.type}${"sessionId" in msg ? ` sessionId=${(msg as any).sessionId}` : ""}`,
+    );
     switch (msg.type) {
       case "hub_start_session":
         this.runSession(msg.sessionId, msg.prompt, { cwd: msg.directory });
@@ -166,6 +169,8 @@ export class MachineRunner {
       case "hub_get_history":
         this.getHistory(msg.sessionId, msg.requestId);
         break;
+      default:
+        console.warn(`[runner] unhandled message type: ${(msg as any).type}`);
     }
   }
 
@@ -201,8 +206,12 @@ export class MachineRunner {
     };
     this.sessions.set(sessionId, session);
     this.sendToHub({ type: "session_status", sessionId, status: "running" });
+    console.log(
+      `[runner] runSession start sid=${sessionId} cwd=${extra.cwd ?? "<none>"} resume=${extra.resume ?? "<none>"} promptLen=${prompt.length}`,
+    );
 
     let promptCounter = 0;
+    let streamCount = 0;
 
     try {
       const options: QueryOptions = {
@@ -228,10 +237,23 @@ export class MachineRunner {
       if (extra.cwd) options.cwd = extra.cwd;
       if (extra.resume) options.resume = extra.resume;
 
+      console.log(`[runner] runSession sid=${sessionId} invoking SDK query()`);
       for await (const msg of this.queryFn({ prompt, options })) {
+        streamCount++;
+        if (streamCount <= 5 || streamCount % 20 === 0) {
+          console.log(
+            `[runner] sid=${sessionId} sdk msg #${streamCount} type=${(msg as any).type}`,
+          );
+        }
         this.processStreamMessage(msg, session);
       }
+      console.log(
+        `[runner] runSession sid=${sessionId} SDK query() complete after ${streamCount} msgs`,
+      );
     } catch (err) {
+      console.error(
+        `[runner] runSession sid=${sessionId} threw after ${streamCount} msgs: ${err instanceof Error ? err.stack || err.message : String(err)}`,
+      );
       if (!abortController.signal.aborted) {
         this.sendToHub({
           type: "session_error",
@@ -240,6 +262,9 @@ export class MachineRunner {
         });
       }
     } finally {
+      console.log(
+        `[runner] runSession sid=${sessionId} cleanup (sdkSessionId=${session.sdkSessionId})`,
+      );
       if (session.sdkSessionId) {
         // Evict oldest entry if at capacity
         if (this.sdkSessionIds.size >= MAX_SDK_SESSION_IDS) {

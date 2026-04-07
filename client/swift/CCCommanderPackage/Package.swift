@@ -12,8 +12,14 @@ let package = Package(
         .library(name: "CCModels", targets: ["CCModels"]),
         .library(name: "CCNetworking", targets: ["CCNetworking"]),
         .library(name: "CCApp", targets: ["CCApp"]),
+        .executable(name: "ccc-shadow", targets: ["CCShadowClient"]),
     ],
     targets: [
+        .executableTarget(
+            name: "CCShadowClient",
+            dependencies: ["CCApp", "CCNetworking", "CCModels"],
+            path: "Sources/CCShadowClient"
+        ),
         .target(
             name: "CCModels",
             path: "Sources/CCModels"

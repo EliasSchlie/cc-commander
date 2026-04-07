@@ -1,5 +1,8 @@
 import Foundation
+import OSLog
 import CCModels
+
+private let log = Logger(subsystem: "com.cc-commander.app", category: "WebSocketClient")
 
 /// Production WebSocket client wrapping URLSessionWebSocketTask.
 public actor WebSocketClient: WebSocketClientProtocol {
@@ -16,54 +19,65 @@ public actor WebSocketClient: WebSocketClientProtocol {
     }
 
     public func connect(request: URLRequest) async throws {
+        log.info("connect: creating ws task for \(request.url?.absoluteString ?? "?", privacy: .public)")
         let task = session.webSocketTask(with: request)
         task.resume()
-        // Verify the connection by sending a ping. URLSessionWebSocketTask's
-        // sendPing completion handler is NOT guaranteed to fire — if the
-        // underlying TCP/TLS connection terminates before the pong roundtrip
-        // completes, the closure is silently dropped and the calling Task
-        // hangs forever ("SWIFT TASK CONTINUATION MISUSE: connect(request:)
-        // leaked its continuation"). Race the ping against a timeout so a
-        // stuck callback can't suspend the connect() caller indefinitely.
-        do {
-            try await withThrowingTaskGroup(of: Void.self) { group in
-                group.addTask {
-                    try await withCheckedThrowingContinuation {
-                        (continuation: CheckedContinuation<Void, Error>) in
-                        task.sendPing { error in
-                            if let error {
-                                continuation.resume(throwing: error)
-                            } else {
-                                continuation.resume()
-                            }
-                        }
-                    }
-                }
-                group.addTask {
-                    try await Task.sleep(nanoseconds: Self.connectTimeoutNs)
-                    throw WebSocketError.connectionFailed(
-                        "connect timed out after \(Self.connectTimeoutNs / 1_000_000_000)s"
-                    )
-                }
-                // First task to finish wins; cancel the other.
-                try await group.next()
-                group.cancelAll()
+
+        // Drive the handshake to completion by awaiting the first frame.
+        // URLSessionWebSocketTask's `sendPing` callback is unreliable
+        // (it's silently dropped when the upstream proxy doesn't forward
+        // pongs) and `task.state` is `.running` immediately after
+        // `resume()`, so neither gives us a real "upgraded" signal. The
+        // hub pushes `session_list` + `machine_list` as the very first
+        // frames after a successful upgrade, so we use the first frame
+        // as the handshake-complete indicator -- and stash it so the
+        // caller's `messages()` stream replays it instead of dropping
+        // the bootstrap on the floor.
+        //
+        // An external timer cancels the task if the handshake hangs,
+        // because `task.cancel()` is the only reliable way to make
+        // `receive()` return with an error.
+        let deadline = DispatchTime.now() + .seconds(Int(Self.connectTimeoutSecs))
+        let timer = DispatchWorkItem { [weak self] in
+            Task { [weak self] in
+                await self?.cancelPending(task: task, reason: "connect timeout")
             }
+        }
+        DispatchQueue.global().asyncAfter(deadline: deadline, execute: timer)
+
+        do {
+            log.info("connect: awaiting first frame as handshake signal")
+            let first = try await task.receive()
+            timer.cancel()
+            log.info("connect: first frame received, upgrade complete")
+            self.task = task
+            self.pendingFirstMessage = first
         } catch {
-            // The server may have rejected us. Check the close code to
-            // distinguish auth rejection (4001) from network failure.
-            // Note: closeCode is .invalid until the close handshake completes.
+            timer.cancel()
             let closeCode = task.closeCode
             task.cancel()
+            log.error("connect: failed state=\(task.state.rawValue, privacy: .public) close=\(closeCode.rawValue, privacy: .public) err=\(String(describing: error), privacy: .public)")
             if closeCode.rawValue == 4001 {
                 throw WebSocketError.authRejected
             }
             throw WebSocketError.connectionFailed(error.localizedDescription)
         }
-        self.task = task
     }
 
-    private static let connectTimeoutNs: UInt64 = 10_000_000_000  // 10s
+    private var pendingFirstMessage: URLSessionWebSocketTask.Message?
+
+    private func cancelPending(task: URLSessionWebSocketTask, reason: String) {
+        // Only cancel if we haven't already committed this task as the
+        // active one (i.e. `connect()` hasn't returned success yet).
+        // Cancelling a task that already completed normally is harmless,
+        // but this guard avoids the log noise and tearing down a healthy
+        // connection if the timer fires a nanosecond after success.
+        guard self.task !== task else { return }
+        log.error("connect: \(reason, privacy: .public); cancelling ws task")
+        task.cancel()
+    }
+
+    private static let connectTimeoutSecs: TimeInterval = 10
 
     public func disconnect() {
         task?.cancel(with: .normalClosure, reason: nil)
@@ -81,27 +95,36 @@ public actor WebSocketClient: WebSocketClientProtocol {
     public func messages() -> AsyncThrowingStream<ServerMessage, Error> {
         let task = self.task
         let decoder = self.decoder
+        // Take the message that connect() consumed to detect upgrade and
+        // hand it to the stream so the bootstrap session_list/machine_list
+        // isn't lost.
+        let primer = self.pendingFirstMessage
+        self.pendingFirstMessage = nil
         return AsyncThrowingStream { continuation in
             let readTask = Task {
                 guard let ws = task else {
                     continuation.finish(throwing: WebSocketError.notConnected)
                     return
                 }
+                func emit(_ wsMessage: URLSessionWebSocketTask.Message) throws {
+                    let data: Data
+                    switch wsMessage {
+                    case .data(let d):
+                        data = d
+                    case .string(let s):
+                        guard let d = s.data(using: .utf8) else { return }
+                        data = d
+                    @unknown default:
+                        return
+                    }
+                    let serverMsg = try decoder.decode(ServerMessage.self, from: data)
+                    continuation.yield(serverMsg)
+                }
                 do {
+                    if let primer { try emit(primer) }
                     while !Task.isCancelled {
                         let wsMessage = try await ws.receive()
-                        let data: Data
-                        switch wsMessage {
-                        case .data(let d):
-                            data = d
-                        case .string(let s):
-                            guard let d = s.data(using: .utf8) else { continue }
-                            data = d
-                        @unknown default:
-                            continue
-                        }
-                        let serverMsg = try decoder.decode(ServerMessage.self, from: data)
-                        continuation.yield(serverMsg)
+                        try emit(wsMessage)
                     }
                     continuation.finish()
                 } catch {
