@@ -66,10 +66,15 @@ function closeWs(ws: WebSocket): Promise<void> {
 async function postJson(
   path: string,
   body: unknown,
+  bearer?: string,
 ): Promise<{ status: number; data: any }> {
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+  };
+  if (bearer) headers["Authorization"] = `Bearer ${bearer}`;
   const res = await fetch(`${baseUrl}${path}`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers,
     body: JSON.stringify(body),
   });
   return { status: res.status, data: await res.json() };
@@ -413,5 +418,163 @@ describe("runner reconnect", () => {
     await closeWs(runner1);
     await closeWs(runner2);
     await closeWs(clientWs);
+  });
+});
+
+// ── Machine registration ────────────────────────────────────────────────
+
+describe("machine registration", () => {
+  // Prevents: clients having no way to add a machine end-to-end
+  it("creates a machine via POST /api/machines and returns the registration token", async () => {
+    const tokens = await auth.register("user@test.com", "pass");
+    const { status, data } = await postJson(
+      "/api/machines",
+      { name: "MacBook" },
+      tokens.token,
+    );
+    assert.equal(status, 201);
+    assert.ok(data.machineId);
+    assert.equal(data.name, "MacBook");
+    assert.ok(data.registrationToken);
+
+    // Token must actually work to connect a runner
+    const runnerWs = await connectRunner(data.registrationToken);
+    assert.equal(runnerWs.readyState, WebSocket.OPEN);
+    await closeWs(runnerWs);
+  });
+
+  // Prevents: unauthenticated machine creation
+  it("rejects machine creation without bearer token", async () => {
+    const { status } = await postJson("/api/machines", { name: "X" });
+    assert.equal(status, 401);
+  });
+
+  // Prevents: machine creation with invalid bearer token
+  it("rejects machine creation with invalid bearer token", async () => {
+    const { status } = await postJson(
+      "/api/machines",
+      { name: "X" },
+      "garbage",
+    );
+    assert.equal(status, 401);
+  });
+
+  // Prevents: empty/missing name silently creating an unnamed machine
+  it("rejects machine creation without a name", async () => {
+    const tokens = await auth.register("user@test.com", "pass");
+    const { status } = await postJson(
+      "/api/machines",
+      { name: "  " },
+      tokens.token,
+    );
+    assert.equal(status, 400);
+  });
+
+  // Prevents: connected clients not seeing newly added machines
+  it("broadcasts updated machine list to connected clients", async () => {
+    const tokens = await auth.register("user@test.com", "pass");
+    const clientWs = await connectClient(tokens.token);
+
+    // Drain initial messages
+    await new Promise((r) => setTimeout(r, 200));
+
+    const updatePromise = waitForMsg(
+      clientWs,
+      (m) => m.type === "machine_list" && m.machines.length === 1,
+    );
+    await postJson("/api/machines", { name: "VPS" }, tokens.token);
+    const update = await updatePromise;
+    assert.equal(update.machines[0].name, "VPS");
+
+    await closeWs(clientWs);
+  });
+});
+
+// ── Runner disconnect → session cleanup ─────────────────────────────────
+
+describe("runner disconnect cleanup", () => {
+  // Prevents: sessions stuck in 'running' forever after the runner drops
+  it("marks running sessions as errored when the runner disconnects", async () => {
+    const tokens = await auth.register("user@test.com", "pass");
+    const account = db.getAccountByEmail("user@test.com")!;
+    const machine = db.createMachine(account.id, "Test Machine");
+
+    const runnerWs = await connectRunner(machine.registrationToken);
+    const clientWs = await connectClient(tokens.token);
+
+    // Start a session via the client (so it ends up in 'running')
+    await new Promise((r) => setTimeout(r, 100));
+    send(clientWs, {
+      type: "start_session",
+      machineId: machine.id,
+      directory: "/tmp",
+      prompt: "Hi",
+    });
+    await new Promise((r) => setTimeout(r, 100));
+
+    // Confirm session is running
+    const sessions = db.listSessionsForAccount(account.id);
+    assert.equal(sessions.length, 1);
+    assert.equal(sessions[0].status, "running");
+    const sessionId = sessions[0].sessionId;
+
+    // Now drop the runner. Client should see updated session list with status=error.
+    const errorListPromise = waitForMsg(
+      clientWs,
+      (m) =>
+        m.type === "session_list" &&
+        m.sessions.some(
+          (s: any) => s.sessionId === sessionId && s.status === "error",
+        ),
+    );
+    await closeWs(runnerWs);
+    const errorList = await errorListPromise;
+    const errored = errorList.sessions.find(
+      (s: any) => s.sessionId === sessionId,
+    );
+    assert.equal(errored.status, "error");
+    assert.equal(errored.lastMessagePreview, "Runner disconnected");
+
+    // DB persists the error state
+    const persisted = db.getSessionById(sessionId)!;
+    assert.equal(persisted.status, "error");
+
+    await closeWs(clientWs);
+  });
+});
+
+// ── Pending history request cleanup ─────────────────────────────────────
+
+describe("pending history cleanup", () => {
+  // Prevents: pendingHistoryRequests leaking entries forever when a client
+  // disconnects before the runner replies
+  it("clears pending history requests when the requesting client disconnects", async () => {
+    const tokens = await auth.register("user@test.com", "pass");
+    const account = db.getAccountByEmail("user@test.com")!;
+    const machine = db.createMachine(account.id, "Test Machine");
+    const session = db.createSession(account.id, machine.id, "/tmp", "idle");
+
+    const runnerWs = await connectRunner(machine.registrationToken);
+    const clientWs = await connectClient(tokens.token);
+    await new Promise((r) => setTimeout(r, 100));
+
+    // Send the history request and confirm the runner sees it
+    const runnerSawRequest = new Promise<any>((resolve) => {
+      runnerWs.once("message", (data) => resolve(JSON.parse(data.toString())));
+    });
+    send(clientWs, {
+      type: "get_session_history",
+      sessionId: session.id,
+    });
+    const req = await runnerSawRequest;
+    assert.equal(req.type, "hub_get_history");
+    assert.equal(hub.pendingHistoryRequests.size, 1);
+
+    // Client disconnects before runner replies. Pending entry must be cleared.
+    await closeWs(clientWs);
+    await new Promise((r) => setTimeout(r, 100));
+    assert.equal(hub.pendingHistoryRequests.size, 0);
+
+    await closeWs(runnerWs);
   });
 });

@@ -92,6 +92,9 @@ export class Hub {
     if (req.method === "POST" && url.pathname === "/api/auth/refresh") {
       return this.handleRefreshEndpoint(req, res);
     }
+    if (req.method === "POST" && url.pathname === "/api/machines") {
+      return this.handleCreateMachine(req, res);
+    }
     if (req.method === "GET" && url.pathname === "/api/health") {
       res.writeHead(200);
       res.end(JSON.stringify({ status: "ok" }));
@@ -146,6 +149,53 @@ export class Hub {
     } catch (err) {
       res.writeHead(401);
       res.end(JSON.stringify({ error: (err as Error).message }));
+    }
+  }
+
+  private async handleCreateMachine(
+    req: IncomingMessage,
+    res: ServerResponse,
+  ): Promise<void> {
+    const payload = this.verifyBearer(req);
+    if (!payload) {
+      res.writeHead(401);
+      res.end(JSON.stringify({ error: "Unauthorized" }));
+      return;
+    }
+    try {
+      const body = await readBody(req);
+      const name = typeof body.name === "string" ? body.name.trim() : "";
+      if (!name) {
+        res.writeHead(400);
+        res.end(JSON.stringify({ error: "name required" }));
+        return;
+      }
+      const machine = this.config.db.createMachine(payload.accountId, name);
+      res.writeHead(201);
+      res.end(
+        JSON.stringify({
+          machineId: machine.id,
+          name: machine.name,
+          registrationToken: machine.registrationToken,
+        }),
+      );
+      this.broadcastMachineList(payload.accountId);
+    } catch (err) {
+      res.writeHead(400);
+      res.end(JSON.stringify({ error: (err as Error).message }));
+    }
+  }
+
+  /** Extracts and verifies a Bearer token from the Authorization header. */
+  private verifyBearer(req: IncomingMessage): JwtPayload | null {
+    const header = req.headers["authorization"];
+    if (typeof header !== "string" || !header.startsWith("Bearer ")) {
+      return null;
+    }
+    try {
+      return this.config.auth.verifyToken(header.slice("Bearer ".length));
+    } catch {
+      return null;
     }
   }
 
@@ -216,6 +266,12 @@ export class Hub {
 
     ws.on("close", () => {
       this.clients.delete(connectionId);
+      // Cancel any pending history requests this client was waiting on
+      for (const [requestId, requestingConn] of this.pendingHistoryRequests) {
+        if (requestingConn === conn) {
+          this.pendingHistoryRequests.delete(requestId);
+        }
+      }
     });
   }
 
@@ -393,7 +449,14 @@ export class Hub {
     ws.on("close", () => {
       if (this.runners.get(machine.id)?.ws === ws) {
         this.runners.delete(machine.id);
+        const affected = this.config.db.markSessionsErrorForMachine(
+          machine.id,
+          "Runner disconnected",
+        );
         this.broadcastMachineList(machine.accountId);
+        if (affected > 0) {
+          this.broadcastSessionList(machine.accountId);
+        }
       }
     });
   }

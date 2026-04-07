@@ -12,7 +12,7 @@ A central server that all clients and machines connect to. There is one hub for 
 
 ## What the hub does NOT do
 
-- Run Claude Code sessions (that's the agent's job)
+- Run Claude Code sessions (that's the runner's job)
 - Interpret or transform Claude SDK messages (it relays them)
 - Store conversation history (that stays on the machine)
-- Store API keys (the agent uses whatever credentials are on that machine)
+- Store API keys (the runner uses whatever credentials are on that machine)
