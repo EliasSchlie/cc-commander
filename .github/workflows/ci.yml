@@ -58,9 +58,17 @@ jobs:
 
       - name: Build macOS app
         working-directory: client/swift
+        # The committed project sets DEVELOPMENT_TEAM so local rebuilds use
+        # a stable signing identity (no keychain prompts on rebuild). The
+        # GitHub runner has no Apple Developer cert, so override back to
+        # ad-hoc signing for the build.
         run: |
           xcodebuild build \
             -project CCCommander.xcodeproj \
             -scheme CCCommander_macOS \
             -destination 'platform=macOS' \
+            CODE_SIGN_IDENTITY=- \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            DEVELOPMENT_TEAM= \
             -quiet

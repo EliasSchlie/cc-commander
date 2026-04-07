@@ -354,8 +354,10 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = Q2U8K9N3BL;
 				HUB_BASE_URL = "http://localhost:3000";
 				INFOPLIST_FILE = CCCommander/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -474,8 +476,10 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = Q2U8K9N3BL;
 				HUB_BASE_URL = "https://hub.cc-commander.com";
 				INFOPLIST_FILE = CCCommander/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
