@@ -1,7 +1,10 @@
 import Foundation
 import Observation
+import OSLog
 import CCModels
 import CCNetworking
+
+private let log = Logger(subsystem: "com.cc-commander.app", category: "AppState")
 
 /// Canonical app state. Owns the hub connection and holds all sessions/machines.
 @MainActor
@@ -49,15 +52,18 @@ public final class AppState {
     /// Start listening for incoming messages. Safe to call multiple times --
     /// previous listener is cancelled.
     public func startListening() {
+        log.info("startListening called")
         listeningTask?.cancel()
         listeningTask = Task { @MainActor in
             let stream = connection.incomingMessages()
             do {
                 for try await message in stream {
+                    log.debug("dispatch message: \(String(describing: message), privacy: .public)")
                     handleMessage(message)
                 }
+                log.info("message stream ended")
             } catch {
-                // Connection dropped
+                log.error("message stream errored: \(String(describing: error), privacy: .public)")
             }
         }
     }
@@ -93,6 +99,7 @@ public final class AppState {
             sessionStreams = sessionStreams.filter { liveIds.contains($0.key) }
 
         case .machineList(let list):
+            log.info("machine_list received with \(list.count, privacy: .public) machine(s)")
             machines = list
 
         case .streamText(let sessionId, let content):

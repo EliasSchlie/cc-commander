@@ -1,5 +1,10 @@
 import Foundation
+import OSLog
 import CCModels
+
+/// Unified-log logger for HubConnection. Stream from the terminal with:
+///     log stream --predicate 'subsystem == "com.cc-commander.app"' --level debug
+private let log = Logger(subsystem: "com.cc-commander.app", category: "HubConnection")
 
 /// Connection state machine for the hub.
 public enum HubConnectionState: Sendable, Equatable {
@@ -62,9 +67,17 @@ public final class HubConnection {
     // MARK: - Auth
 
     public func login(email: String, password: String) async throws {
-        let tokens = try await authClient.login(email: email, password: password)
-        try keychain.saveTokens(jwt: tokens.token, refreshToken: tokens.refreshToken)
-        try await connectWebSocket(token: tokens.token)
+        log.info("login start email=\(email, privacy: .public)")
+        do {
+            let tokens = try await authClient.login(email: email, password: password)
+            log.info("login REST ok, saving tokens")
+            try keychain.saveTokens(jwt: tokens.token, refreshToken: tokens.refreshToken)
+            try await connectWebSocket(token: tokens.token)
+            log.info("login complete, ws connected")
+        } catch {
+            log.error("login failed: \(String(describing: error), privacy: .public)")
+            throw error
+        }
     }
 
     public func register(email: String, password: String) async throws {
@@ -77,19 +90,28 @@ public final class HubConnection {
     /// Only attempts refresh if the WebSocket connection is rejected (auth error),
     /// not on transient network failures.
     public func connectWithStoredTokens() async throws {
+        log.info("connectWithStoredTokens called")
         guard let token = keychain.jwt else {
+            log.info("connectWithStoredTokens: no jwt in keychain")
             throw HubConnectionError.noStoredTokens
         }
+        log.info("connectWithStoredTokens: jwt found len=\(token.count, privacy: .public), connecting ws")
         do {
             try await connectWebSocket(token: token)
+            log.info("connectWithStoredTokens: ws connected with stored jwt")
         } catch WebSocketError.authRejected {
-            // JWT was rejected -- try to refresh it
+            log.info("connectWithStoredTokens: jwt rejected, trying refresh")
             guard let refresh = keychain.refreshToken else {
+                log.error("connectWithStoredTokens: no refresh token available")
                 throw WebSocketError.authRejected
             }
             let tokens = try await authClient.refresh(refreshToken: refresh)
             try keychain.saveTokens(jwt: tokens.token, refreshToken: tokens.refreshToken)
             try await connectWebSocket(token: tokens.token)
+            log.info("connectWithStoredTokens: ws connected with refreshed jwt")
+        } catch {
+            log.error("connectWithStoredTokens: ws connect failed: \(String(describing: error), privacy: .public)")
+            throw error
         }
     }
 
@@ -139,9 +161,28 @@ public final class HubConnection {
     /// AppState subscribes to this. Only one subscriber at a time --
     /// calling again terminates the previous stream.
     public func incomingMessages() -> AsyncThrowingStream<ServerMessage, Error> {
+        log.info("incomingMessages: subscriber attaching")
         messageContinuation?.finish()
         return AsyncThrowingStream { continuation in
             self.messageContinuation = continuation
+            // Re-request the bootstrap data: the hub auto-pushes
+            // session_list and machine_list immediately on WebSocket
+            // connect, but if connectWebSocket() ran before the
+            // subscriber attached, those messages were yielded into a
+            // nil continuation and dropped on the floor. Without this
+            // re-request, every fresh login leaves the app showing an
+            // empty machine list until the next message happens to
+            // come in.
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                if self.state == .connected {
+                    log.info("incomingMessages: connected; re-requesting machine_list + session_list")
+                    try? await self.requestMachineList()
+                    try? await self.requestSessionList()
+                } else {
+                    log.info("incomingMessages: not yet connected; bootstrap re-request skipped")
+                }
+            }
             continuation.onTermination = { [weak self] _ in
                 Task { @MainActor in
                     self?.messageContinuation = nil
@@ -160,6 +201,7 @@ public final class HubConnection {
     }
 
     private func connectWebSocket(token: String) async throws {
+        log.info("connectWebSocket: building url from baseURL=\(self.baseURL.absoluteString, privacy: .public)")
         state = .connecting
         shouldReconnect = true
         reconnectDelay = 1.0
@@ -167,15 +209,18 @@ public final class HubConnection {
         // Build WSS URL with token in Authorization header (not query string,
         // to keep JWTs out of access logs).
         guard var components = URLComponents(url: baseURL, resolvingAgainstBaseURL: false) else {
+            log.error("connectWebSocket: URLComponents failed for baseURL")
             state = .disconnected
             throw HubConnectionError.invalidURL
         }
         components.path = "/ws/client"
         components.scheme = (components.scheme == "https") ? "wss" : "ws"
         guard let wsURL = components.url else {
+            log.error("connectWebSocket: components.url returned nil")
             state = .disconnected
             throw HubConnectionError.invalidURL
         }
+        log.info("connectWebSocket: connecting to \(wsURL.absoluteString, privacy: .public)")
 
         var request = URLRequest(url: wsURL)
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
@@ -183,7 +228,9 @@ public final class HubConnection {
         let ws = wsClientFactory()
         do {
             try await ws.connect(request: request)
+            log.info("connectWebSocket: ws.connect returned ok")
         } catch {
+            log.error("connectWebSocket: ws.connect threw \(String(describing: error), privacy: .public)")
             // Connect failed -- don't store the leaked client, restore state
             state = .disconnected
             throw error
@@ -193,6 +240,7 @@ public final class HubConnection {
         self.wsClient = ws
         state = .connected
         reconnectDelay = 1.0
+        log.info("connectWebSocket: state=connected, starting message reader")
 
         // Start reading messages
         messageStreamTask?.cancel()
@@ -200,10 +248,13 @@ public final class HubConnection {
             let stream = await ws.messages()
             do {
                 for try await msg in stream {
+                    log.debug("ws message received: \(String(describing: msg), privacy: .public)")
                     self?.messageContinuation?.yield(msg)
                 }
+                log.info("ws message stream ended cleanly")
                 self?.handleDisconnect()
             } catch {
+                log.error("ws message stream threw: \(String(describing: error), privacy: .public)")
                 self?.handleDisconnect()
             }
         }
