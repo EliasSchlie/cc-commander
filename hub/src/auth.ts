@@ -10,7 +10,9 @@ export class DuplicateEmailError extends Error {
 }
 
 const SALT_ROUNDS = 10;
-const JWT_EXPIRY = "15m";
+// Short-lived access token. Long sessions are handled by the 30-day
+// refresh token below, not by extending this.
+const JWT_EXPIRY = "1h";
 const REFRESH_EXPIRY_DAYS = 30;
 
 export interface TokenPair {
