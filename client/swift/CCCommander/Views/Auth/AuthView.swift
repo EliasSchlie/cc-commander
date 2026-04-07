@@ -72,13 +72,19 @@ struct AuthView: View {
         isLoading = true
         errorMessage = nil
         Task {
+            // Subscribe BEFORE the login call. login() opens the
+            // WebSocket, and the hub immediately auto-pushes
+            // session_list and machine_list on connect. If we attach
+            // the subscriber after that, those messages are dropped
+            // (yielded into a nil continuation) and the user sees an
+            // empty machine list until something else happens.
+            appState.startListening()
             do {
                 if isRegistering {
                     try await appState.connection.register(email: email, password: password)
                 } else {
                     try await appState.connection.login(email: email, password: password)
                 }
-                appState.startListening()
             } catch {
                 errorMessage = error.localizedDescription
             }
