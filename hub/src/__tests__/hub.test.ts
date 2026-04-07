@@ -650,6 +650,9 @@ describe("pending history cleanup", () => {
     const reply = await historyMsg;
     assert.equal(reply.sessionId, session.id);
     assert.deepEqual(reply.messages, []);
+    // Degraded reply must carry a stable error code so the client can
+    // render e.g. "history unavailable: timeout".
+    assert.equal(reply.error, "timeout");
     assert.equal(hub.pendingHistoryRequests.size, 0);
 
     await closeWs(clientWs);

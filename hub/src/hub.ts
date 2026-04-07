@@ -535,6 +535,7 @@ export class Hub {
         sessionId: msg.sessionId,
         requestId,
         messages: [],
+        error: "timeout",
       });
     }, this.config.historyRequestTtlMs ?? PENDING_HISTORY_TTL_MS);
     timer.unref();
@@ -687,6 +688,15 @@ export class Hub {
         this.config.db.updateSessionStatus(msg.sessionId, "error", msg.error);
         this.relayToClients(conn.accountId, msg);
         this.broadcastSessionList(conn.accountId);
+        break;
+
+      case "dropped_tool_block":
+        // Pure observability signal: SDK shape drift surfaced by the
+        // runner-side guards. Logged here so a single grep on the hub
+        // catches it across the fleet; #44 follow-up wires a counter.
+        console.warn(
+          `[hub] dropped_tool_block machine=${conn.machineId} session=${msg.sessionId} block=${msg.blockType} reason=${msg.reason}`,
+        );
         break;
     }
   }

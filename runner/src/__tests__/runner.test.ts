@@ -244,6 +244,68 @@ describe("session lifecycle", () => {
     runner.disconnect();
   });
 
+  // When an SDK content block fails a runtime guard, the runner must
+  // (a) skip the block and (b) emit dropped_tool_block so drift is
+  // counted instead of seen as silence.
+  it("emits dropped_tool_block when tool_use lacks an id", async () => {
+    const runner = new MachineRunner({
+      hubUrl: `ws://localhost:${hubPort}`,
+      registrationToken: "test-token",
+      machineName: "Test",
+      queryFn: mockQuery([
+        {
+          type: "assistant",
+          message: {
+            content: [
+              { type: "tool_use", name: "Bash", input: { command: "ls" } },
+            ],
+          },
+        },
+        {
+          type: "user",
+          message: {
+            content: [{ type: "tool_result", content: "out" }],
+          },
+        },
+        { type: "result", session_id: "sdk-3", num_turns: 1, duration_ms: 10 },
+      ]),
+    });
+    await runner.connect();
+    await waitForRunnerMsg((m) => m.type === "runner_hello");
+
+    const allMsgs: any[] = [];
+    runnerSocket!.on("message", (data) => {
+      allMsgs.push(JSON.parse(data.toString()));
+    });
+
+    sendToRunner({
+      type: "hub_start_session",
+      sessionId: "s-drop",
+      directory: "/tmp",
+      prompt: "go",
+    });
+    await new Promise((r) => setTimeout(r, 300));
+
+    const dropped = allMsgs.filter((m) => m.type === "dropped_tool_block");
+    assert.equal(dropped.length, 2);
+    assert.deepEqual(dropped.map((m) => m.blockType).sort(), [
+      "tool_result",
+      "tool_use",
+    ]);
+    assert.ok(dropped.every((m) => m.sessionId === "s-drop"));
+    // No tool_call/tool_result must escape the guard.
+    assert.equal(
+      allMsgs.find((m) => m.type === "tool_call"),
+      undefined,
+    );
+    assert.equal(
+      allMsgs.find((m) => m.type === "tool_result"),
+      undefined,
+    );
+
+    runner.disconnect();
+  });
+
   // Prevents: AskUserQuestion not being relayed, or answers not reaching SDK
   it("relays AskUserQuestion and resolves with answer", async () => {
     const runner = new MachineRunner({

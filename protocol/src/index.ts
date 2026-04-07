@@ -182,11 +182,35 @@ export interface SessionErrorMsg {
   error: string;
 }
 
+/**
+ * Stable codes for a degraded session_history reply. Literal union (not
+ * bare string) so callers get exhaustive switch checks; mirrors the
+ * SessionStatus pattern above.
+ */
+export type HistoryErrorCode = "timeout" | "no_session" | "fetch_failed";
+
 export interface SessionHistoryMsg {
   type: "session_history";
   sessionId: string;
   requestId: string;
   messages: unknown[];
+  /** Set on degraded replies; absent on healthy ones. */
+  error?: HistoryErrorCode;
+}
+
+export type DroppedBlockType = "tool_use" | "tool_result";
+export type DroppedBlockReason = "missing_id" | "missing_tool_use_id";
+
+/**
+ * Runner→hub signal that an SDK content block failed a runtime guard
+ * and was skipped. Pure observability; hub counts these to surface SDK
+ * shape drift.
+ */
+export interface DroppedToolBlockMsg {
+  type: "dropped_tool_block";
+  sessionId: string;
+  blockType: DroppedBlockType;
+  reason: DroppedBlockReason;
 }
 
 export interface RunnerHelloMsg {
@@ -203,6 +227,7 @@ export type RunnerToHubMsg =
   | SessionDoneMsg
   | SessionErrorMsg
   | SessionHistoryMsg
+  | DroppedToolBlockMsg
   | RunnerHelloMsg;
 
 // ── Messages: Hub -> Client ─────────────────────────────────────────────
@@ -262,6 +287,7 @@ const RUNNER_MSG_REQUIRED_FIELDS: Record<string, readonly string[]> = {
   session_done: ["sessionId", "sdkSessionId"],
   session_error: ["sessionId", "error"],
   session_history: ["sessionId", "requestId", "messages"],
+  dropped_tool_block: ["sessionId", "blockType", "reason"],
   runner_hello: ["machineName"],
 };
 

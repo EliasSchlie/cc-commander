@@ -2,6 +2,8 @@ import { WebSocket } from "ws";
 import { query, getSessionMessages } from "@anthropic-ai/claude-agent-sdk";
 import { parseHubMessage, serialize } from "@cc-commander/protocol";
 import type {
+  DroppedBlockReason,
+  DroppedBlockType,
   HubToRunnerMsg,
   RunnerToHubMsg,
   UserPromptResponse,
@@ -354,11 +356,7 @@ export class MachineRunner {
           for (const bl of content) {
             if (bl.type === "tool_use" && bl.name !== ASK_USER_TOOL) {
               if (typeof bl.id !== "string") {
-                // Surface SDK shape drift at the source instead of as a
-                // silent hub-side rejection on a missing toolCallId.
-                console.error(
-                  `[runner] tool_use missing id: ${JSON.stringify(bl).slice(0, 200)}`,
-                );
+                this.dropToolBlock(sessionId, "tool_use", "missing_id", bl);
                 continue;
               }
               this.sendToHub({
@@ -379,8 +377,11 @@ export class MachineRunner {
           for (const bl of content) {
             if (bl.type === "tool_result") {
               if (typeof bl.tool_use_id !== "string") {
-                console.error(
-                  `[runner] tool_result missing tool_use_id: ${JSON.stringify(bl).slice(0, 200)}`,
+                this.dropToolBlock(
+                  sessionId,
+                  "tool_result",
+                  "missing_tool_use_id",
+                  bl,
                 );
                 continue;
               }
@@ -430,6 +431,7 @@ export class MachineRunner {
         sessionId,
         requestId,
         messages: [],
+        error: "no_session",
       });
       return;
     }
@@ -449,8 +451,29 @@ export class MachineRunner {
         sessionId,
         requestId,
         messages: [],
+        error: "fetch_failed",
       });
     }
+  }
+
+  private dropToolBlock(
+    sessionId: string,
+    blockType: DroppedBlockType,
+    reason: DroppedBlockReason,
+    raw: unknown,
+  ): void {
+    // Surface SDK shape drift at the source instead of as a silent
+    // hub-side rejection downstream. The dropped_tool_block message
+    // is the structured signal; the log line is the human view.
+    console.error(
+      `[runner] dropped ${blockType} (${reason}): ${JSON.stringify(raw).slice(0, 200)}`,
+    );
+    this.sendToHub({
+      type: "dropped_tool_block",
+      sessionId,
+      blockType,
+      reason,
+    });
   }
 
   // ── Prompt resolution ─────────────────────────────────────────────────

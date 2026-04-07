@@ -119,6 +119,41 @@ describe("parseRunnerMessage", () => {
     );
     assert.equal(result.type, "tool_result");
   });
+
+  it("accepts dropped_tool_block with all fields", () => {
+    const msg = parseRunnerMessage(
+      '{"type":"dropped_tool_block","sessionId":"s1","blockType":"tool_use","reason":"missing_id"}',
+    );
+    assert.equal(msg.type, "dropped_tool_block");
+  });
+
+  it("rejects dropped_tool_block without reason", () => {
+    assert.throws(
+      () =>
+        parseRunnerMessage(
+          '{"type":"dropped_tool_block","sessionId":"s1","blockType":"tool_use"}',
+        ),
+      /Missing required field: reason/,
+    );
+  });
+
+  // Degraded session_history replies must carry a stable error code so
+  // clients can branch on it (e.g. render "history unavailable: timeout").
+  it("accepts session_history with error code", () => {
+    const msg = parseRunnerMessage(
+      '{"type":"session_history","sessionId":"s1","requestId":"r1","messages":[],"error":"fetch_failed"}',
+    );
+    assert.equal(msg.type, "session_history");
+    assert.equal((msg as { error?: string }).error, "fetch_failed");
+  });
+
+  it("accepts session_history without error field", () => {
+    const msg = parseRunnerMessage(
+      '{"type":"session_history","sessionId":"s1","requestId":"r1","messages":[]}',
+    );
+    assert.equal(msg.type, "session_history");
+    assert.equal((msg as { error?: string }).error, undefined);
+  });
 });
 
 describe("parseHubMessage", () => {
