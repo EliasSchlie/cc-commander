@@ -43,6 +43,17 @@ describe("parseClientMessage", () => {
     assert.equal(msg.type, "list_sessions");
   });
 
+  // Symmetric with parseHubMessage's hub_respond_to_prompt check.
+  it("rejects respond_to_prompt with non-object response", () => {
+    assert.throws(
+      () =>
+        parseClientMessage(
+          '{"type":"respond_to_prompt","sessionId":"s1","promptId":"p","response":"yes"}',
+        ),
+      /missing or invalid "response"/,
+    );
+  });
+
   // Prevents: invalid JSON crashing instead of throwing cleanly
   it("throws on invalid JSON", () => {
     assert.throws(() => parseClientMessage("not json"), {
@@ -130,6 +141,31 @@ describe("parseHubMessage", () => {
     assert.throws(
       () => parseHubMessage('{"type":"hub_get_history","sessionId":"s1"}'),
       /Missing required field: requestId/,
+    );
+  });
+
+  // Prevents: regression after #29 unification -- the pre-#29
+  // runner-side parser rejected empty strings via isNonEmptyString.
+  // The hub-style validateFields only checks `!== undefined`, which
+  // would silently accept "" and produce broken sessions downstream.
+  // parseHubMessage tightens the check back for hub→runner traffic.
+  it("rejects hub_start_session with empty sessionId", () => {
+    assert.throws(
+      () =>
+        parseHubMessage(
+          '{"type":"hub_start_session","sessionId":"","directory":"/tmp","prompt":"hi"}',
+        ),
+      /must be a non-empty string/,
+    );
+  });
+
+  it("rejects hub_get_history with empty requestId", () => {
+    assert.throws(
+      () =>
+        parseHubMessage(
+          '{"type":"hub_get_history","sessionId":"s1","requestId":""}',
+        ),
+      /must be a non-empty string/,
     );
   });
 

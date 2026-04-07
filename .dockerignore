@@ -1,0 +1,26 @@
+# The hub Dockerfile uses the repo root as build context (because
+# the hub depends on the workspace package @cc-commander/protocol).
+# Without this file, every layer rebuild would upload the entire
+# tree -- node_modules, the Swift client, the .git history, every
+# worktree -- to the daemon. Keep the context tight.
+
+node_modules
+**/node_modules
+.git
+.wt
+client
+*.tsbuildinfo
+dist
+**/dist
+
+# Tests, lockfile-not-needed-at-runtime artifacts, editor cruft.
+**/__tests__
+**/*.test.ts
+.DS_Store
+.env
+.env.*
+*.log
+
+# Anything we explicitly do NOT want shipped in the hub image.
+hub.db
+*.db

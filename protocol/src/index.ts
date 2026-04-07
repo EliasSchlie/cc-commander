@@ -283,6 +283,10 @@ function validateFields(
   }
 }
 
+function isObjectShape(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
 function parseEnvelope(data: string): Record<string, unknown> {
   const msg = JSON.parse(data);
   if (typeof msg !== "object" || msg === null || typeof msg.type !== "string") {
@@ -300,6 +304,14 @@ export function parseClientMessage(data: string): ClientToHubMsg {
     );
   }
   validateFields(msg, fields);
+  // Symmetric with parseHubMessage: respond_to_prompt.response must be
+  // an object, not a string/array/null. Catches malformed clients
+  // before hub-side handlers have to defend against it.
+  if (msg.type === "respond_to_prompt" && !isObjectShape(msg.response)) {
+    throw new MessageValidationError(
+      'Invalid respond_to_prompt: missing or invalid "response"',
+    );
+  }
   return msg as unknown as ClientToHubMsg;
 }
 
@@ -324,20 +336,27 @@ export function parseHubMessage(data: string): HubToRunnerMsg {
     );
   }
   validateFields(msg, fields);
+  // The runner is the most exposed parser surface (it executes the
+  // received commands), so it gets the strictest validation. Every
+  // listed field on a hub→runner message is a string id/path/prompt
+  // -- empty strings would silently produce broken sessions
+  // downstream. Match the pre-#29 runner-side parser which rejected
+  // them at the boundary.
+  for (const field of fields) {
+    if (field === "response") continue;
+    if (typeof msg[field] !== "string" || (msg[field] as string).length === 0) {
+      throw new MessageValidationError(
+        `Invalid ${msg.type as string}: field "${field}" must be a non-empty string`,
+      );
+    }
+  }
   // hub_respond_to_prompt carries an object `response`. The generic
   // field check only catches missing/undefined; reject non-object
   // shapes here so the runner doesn't have to defend against it.
-  if (msg.type === "hub_respond_to_prompt") {
-    const response = msg.response;
-    if (
-      typeof response !== "object" ||
-      response === null ||
-      Array.isArray(response)
-    ) {
-      throw new MessageValidationError(
-        'Invalid hub_respond_to_prompt: missing or invalid "response"',
-      );
-    }
+  if (msg.type === "hub_respond_to_prompt" && !isObjectShape(msg.response)) {
+    throw new MessageValidationError(
+      'Invalid hub_respond_to_prompt: missing or invalid "response"',
+    );
   }
   return msg as unknown as HubToRunnerMsg;
 }
