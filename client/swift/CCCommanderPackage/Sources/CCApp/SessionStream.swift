@@ -105,18 +105,100 @@ public final class SessionStream {
 
     public func loadHistory(_ messages: [AnyCodable]) {
         for msg in messages {
-            if case .dictionary(let dict) = msg {
-                if case .string(let role) = dict["role"], case .string(let content) = dict["content"] {
-                    let id = UUID().uuidString
-                    if role == "user" {
-                        entries.append(.userMessage(id: id, text: content))
-                    } else if role == "assistant" {
-                        entries.append(.assistantText(id: id, text: content))
+            guard case .dictionary(let dict) = msg,
+                  case .string(let role) = dict["role"] else { continue }
+
+            let content = dict["content"]
+
+            // Simple shape: content is a plain string.
+            if case .string(let text) = content {
+                let id = UUID().uuidString
+                if role == "user" {
+                    entries.append(.userMessage(id: id, text: text))
+                } else if role == "assistant" && !text.isEmpty {
+                    entries.append(.assistantText(id: id, text: text))
+                }
+                continue
+            }
+
+            // Block-array shape: content is [{type: "text"|"tool_use"|"tool_result", ...}]
+            guard case .array(let blocks) = content else { continue }
+            for block in blocks {
+                guard case .dictionary(let bl) = block,
+                      case .string(let type) = bl["type"] else { continue }
+
+                switch type {
+                case "text":
+                    if role == "assistant", case .string(let text) = bl["text"], !text.isEmpty {
+                        entries.append(.assistantText(id: UUID().uuidString, text: text))
+                    } else if role == "user", case .string(let text) = bl["text"] {
+                        entries.append(.userMessage(id: UUID().uuidString, text: text))
                     }
+                case "tool_use":
+                    guard case .string(let toolCallId) = bl["id"],
+                          case .string(let toolName) = bl["name"] else { continue }
+                    entries.append(.toolCall(
+                        id: UUID().uuidString,
+                        toolCallId: toolCallId,
+                        toolName: toolName,
+                        display: Self.formatToolDisplay(name: toolName, input: bl["input"]),
+                        result: nil
+                    ))
+                case "tool_result":
+                    guard case .string(let toolUseId) = bl["tool_use_id"] else { continue }
+                    let text = Self.extractToolResultText(bl["content"])
+                    if let idx = entries.lastIndex(where: {
+                        if case .toolCall(_, let tcId, _, _, _) = $0 { return tcId == toolUseId }
+                        return false
+                    }) {
+                        entries[idx].setResult(text)
+                    } else {
+                        // Orphan tool_result (tool_use missing from history window).
+                        // Render as a standalone toolCall so the result is still visible.
+                        entries.append(.toolCall(
+                            id: UUID().uuidString,
+                            toolCallId: toolUseId,
+                            toolName: "(unknown tool)",
+                            display: "(unknown tool)",
+                            result: text
+                        ))
+                    }
+                default:
+                    continue
                 }
             }
         }
         currentTurnStartIndex = entries.count
+    }
+
+    /// Mirrors the runner's `formatToolDisplay`. Kept here so reloads from
+    /// history match the formatting of live tool_call events.
+    private static func formatToolDisplay(name: String, input: AnyCodable?) -> String {
+        guard case .dictionary(let dict) = input else { return name }
+        if name == "Bash", case .string(let cmd) = dict["command"] {
+            return "$ " + cmd
+        }
+        if case .string(let path) = dict["file_path"] {
+            return name + " " + path
+        }
+        if case .string(let pat) = dict["pattern"] {
+            return name + " " + pat
+        }
+        return name
+    }
+
+    private static func extractToolResultText(_ content: AnyCodable?) -> String {
+        guard let content else { return "" }
+        if case .string(let s) = content { return s }
+        if case .array(let blocks) = content {
+            return blocks.compactMap { bl -> String? in
+                guard case .dictionary(let d) = bl,
+                      case .string(let type) = d["type"], type == "text",
+                      case .string(let text) = d["text"] else { return nil }
+                return text
+            }.joined(separator: "\n")
+        }
+        return ""
     }
 
     // MARK: - Private

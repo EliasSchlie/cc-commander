@@ -35,6 +35,13 @@ export interface HubConfig {
   port: number;
   db: HubDb;
   auth: AuthService;
+  /**
+   * Version string served by GET /api/version. Runners poll this and
+   * self-update when their own VERSION differs. Typically set to the git
+   * tag at build time (Dockerfile ARG VERSION). Empty string disables
+   * the runner self-update protocol (runners will see "" and skip).
+   */
+  version?: string;
 }
 
 export class Hub {
@@ -101,6 +108,11 @@ export class Hub {
     if (req.method === "GET" && url.pathname === "/api/health") {
       res.writeHead(200);
       res.end(JSON.stringify({ status: "ok" }));
+      return;
+    }
+    if (req.method === "GET" && url.pathname === "/api/version") {
+      res.writeHead(200);
+      res.end(JSON.stringify({ version: this.config.version ?? "" }));
       return;
     }
 

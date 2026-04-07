@@ -95,6 +95,34 @@ afterEach(async () => {
   db.close();
 });
 
+// ── /api/version ────────────────────────────────────────────────────────
+
+describe("GET /api/version", () => {
+  // Prevents: runners can't tell if their build matches the hub's
+  it("returns the configured version", async () => {
+    await hub.stop();
+    db.close();
+    db = new HubDb(":memory:");
+    auth = new AuthService(db, JWT_SECRET);
+    hub = new Hub({ port: 0, db, auth, version: "v1.2.3" });
+    await hub.start();
+    const addr = hub.httpServer.address();
+    const p = typeof addr === "object" && addr ? addr.port : 0;
+    const res = await fetch(`http://localhost:${p}/api/version`);
+    assert.equal(res.status, 200);
+    const data = await res.json();
+    assert.equal(data.version, "v1.2.3");
+  });
+
+  // Prevents: undefined version crashing JSON serialization
+  it("returns empty string when version is unset", async () => {
+    const res = await fetch(`${baseUrl}/api/version`);
+    assert.equal(res.status, 200);
+    const data = await res.json();
+    assert.equal(data.version, "");
+  });
+});
+
 // ── REST Auth ───────────────────────────────────────────────────────────
 
 describe("REST auth", () => {
