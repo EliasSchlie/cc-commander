@@ -487,6 +487,49 @@ describe("protocol validation", () => {
 
     // Runner survived the malformed message
     assert.equal(runner.ws?.readyState, WebSocket.OPEN);
+    // #44 A3: parse rejections must be counted locally so an offline
+    // runner still has accounting when the hub-side counter is unreachable.
+    assert.equal(runner.metrics.snapshot()["runner.parse_reject"], 1);
+    runner.disconnect();
+  });
+
+  // #44 A3: dropped tool blocks must be counted on the runner side as
+  // well as the hub side. The local counter is the source of truth when
+  // the hub link is down or the hub-side counter resets on restart.
+  it("counts runner.dropped_tool_block when guard fires", async () => {
+    const runner = new MachineRunner({
+      hubUrl: `ws://localhost:${hubPort}`,
+      registrationToken: "test-token",
+      machineName: "Test",
+      queryFn: mockQuery([
+        {
+          type: "assistant",
+          message: {
+            content: [
+              { type: "tool_use", name: "Bash", input: { command: "ls" } },
+            ],
+          },
+        },
+        { type: "result", session_id: "sdk-m", num_turns: 1, duration_ms: 5 },
+      ]),
+    });
+    await runner.connect();
+    await waitForRunnerMsg((m) => m.type === "runner_hello");
+
+    sendToRunner({
+      type: "hub_start_session",
+      sessionId: "s-m",
+      directory: "/tmp",
+      prompt: "go",
+    });
+    await new Promise((r) => setTimeout(r, 200));
+
+    assert.equal(
+      runner.metrics.snapshot()[
+        "runner.dropped_tool_block{block_type=tool_use,reason=missing_id}"
+      ],
+      1,
+    );
     runner.disconnect();
   });
 });

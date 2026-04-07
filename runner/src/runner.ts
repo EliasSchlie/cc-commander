@@ -1,6 +1,7 @@
 import { WebSocket } from "ws";
 import { query, getSessionMessages } from "@anthropic-ai/claude-agent-sdk";
 import { parseHubMessage, serialize } from "@cc-commander/protocol";
+import { Metrics, RUNNER_METRIC } from "@cc-commander/protocol/metrics";
 import type {
   DroppedToolBlockMsg,
   HubToRunnerMsg,
@@ -49,6 +50,8 @@ export interface RunnerConfig {
   reconnectIntervalMs?: number;
   queryFn?: QueryFn;
   getSessionMessagesFn?: GetSessionMessagesFn;
+  /** Inject a Metrics instance (mostly for tests). */
+  metrics?: Metrics;
 }
 
 export class MachineRunner {
@@ -60,6 +63,7 @@ export class MachineRunner {
   reconnectTimer: ReturnType<typeof setTimeout> | null;
   queryFn: QueryFn;
   getSessionMessagesFn: GetSessionMessagesFn;
+  metrics: Metrics;
 
   constructor(config: RunnerConfig) {
     this.config = config;
@@ -71,9 +75,14 @@ export class MachineRunner {
     this.queryFn = config.queryFn || query;
     this.getSessionMessagesFn =
       config.getSessionMessagesFn || getSessionMessages;
+    this.metrics = config.metrics ?? new Metrics();
   }
 
   connect(): Promise<void> {
+    // Idempotent: reconnect re-enters connect() and start() is a no-op
+    // when the timer is already running, so counters keep flowing across
+    // reconnect storms without losing the running totals.
+    this.metrics.start();
     return new Promise((resolve, reject) => {
       const url = `${this.config.hubUrl}/ws/runner?token=${this.config.registrationToken}`;
       this.ws = new WebSocket(url);
@@ -96,6 +105,7 @@ export class MachineRunner {
           const msg = parseHubMessage(data.toString());
           this.handleMessage(msg);
         } catch (err) {
+          this.metrics.inc(RUNNER_METRIC.PARSE_REJECT);
           console.error("[runner] Invalid message from hub:", err);
         }
       });
@@ -120,6 +130,7 @@ export class MachineRunner {
 
   disconnect(): void {
     this.shouldReconnect = false;
+    this.metrics.stop();
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
@@ -467,7 +478,13 @@ export class MachineRunner {
   ): void {
     // Surface SDK shape drift at the source instead of as a silent
     // hub-side rejection downstream. The dropped_tool_block message
-    // is the structured signal; the log line is the human view.
+    // is the structured signal; the log line is the human view; the
+    // metric is the operator view (counted on both runner and hub so
+    // an offline runner still has local accounting).
+    this.metrics.inc(RUNNER_METRIC.DROPPED_TOOL_BLOCK, {
+      block_type: payload.blockType,
+      reason: payload.reason,
+    });
     console.error(
       `[runner] dropped ${payload.blockType} (${payload.reason}): ${JSON.stringify(raw).slice(0, 200)}`,
     );
