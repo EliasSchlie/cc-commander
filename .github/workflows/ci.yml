@@ -31,10 +31,23 @@ jobs:
       - run: npm run typecheck
       - run: npm test
 
-  swift:
-    name: Swift package + Xcode builds
+  swift-test:
+    name: Swift package tests
+    # Xcode 16 (macos-15) is required for the swift-testing 'Testing' module.
+    runs-on: macos-15
+    defaults:
+      run:
+        working-directory: client/swift/CCCommanderPackage
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select Xcode 16
+        run: sudo xcode-select -s /Applications/Xcode_16.app
+      - run: swift test
+
+  xcode-build:
+    name: Xcode app builds (iOS + macOS)
     # macos-14 ships Xcode 15 with the iOS 17 runtime preinstalled.
-    # Our project deploys to iOS 17 / macOS 14 so this is the right match.
+    # Our deployment targets are iOS 17 / macOS 14 so this matches.
     runs-on: macos-14
     defaults:
       run:
@@ -46,10 +59,6 @@ jobs:
         run: |
           xcodebuild -version
           xcodebuild -showsdks
-
-      - name: Run Swift package tests
-        working-directory: client/swift/CCCommanderPackage
-        run: swift test
 
       - name: Build macOS app
         run: |
