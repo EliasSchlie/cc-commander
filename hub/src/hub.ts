@@ -198,6 +198,12 @@ export class Hub {
     this.httpServer = createServer((req, res) => this.handleHttp(req, res));
     this.wss = new WebSocketServer({
       server: this.httpServer,
+      // Cap one WebSocket frame at 4 MiB (ws default is 100 MiB). The
+      // largest legitimate message is a tool_result that can embed file
+      // contents, build output, or grep dumps; 1 MiB is realistic worst
+      // case for those, so 4 MiB leaves headroom while bounding the
+      // memory cost of a single malicious frame.
+      maxPayload: 4 * 1024 * 1024,
       // Per-IP rate limit BEFORE the upgrade completes. Even rejected
       // upgrades have non-zero cost (socket alloc, handshake, FD), and
       // an attacker can hold half-open sockets to the FD ceiling. The
@@ -343,6 +349,32 @@ export class Hub {
 
   private handleConnection(ws: WebSocket, req: IncomingMessage): void {
     const url = new URL(req.url || "/", `http://localhost:${this.config.port}`);
+
+    // ws emits `error` (then `close` 1009) when an inbound frame
+    // exceeds maxPayload. Discriminate by the ws-specific error code
+    // (`WS_ERR_UNSUPPORTED_MESSAGE_LENGTH`) rather than `RangeError`,
+    // which ws also throws for other protocol violations (RSV bits,
+    // bad opcode, invalid UTF-8). Without an `error` listener, ws's
+    // default would surface as uncaughtException.
+    ws.on("error", (err: Error & { code?: string }) => {
+      if (err.code === "WS_ERR_UNSUPPORTED_MESSAGE_LENGTH") {
+        this.metrics.inc(HUB_METRIC.OVERSIZED_FRAME, {
+          endpoint: url.pathname === "/ws/runner" ? "runner" : "client",
+        });
+        this.log.warn("oversized websocket frame rejected", {
+          ip: clientIp(req),
+          endpoint: url.pathname,
+          err: err.message,
+        });
+      } else {
+        this.log.debug("websocket error", {
+          ip: clientIp(req),
+          endpoint: url.pathname,
+          code: err.code,
+          err: err.message,
+        });
+      }
+    });
 
     if (url.pathname === "/ws/client") {
       this.handleClientConnection(ws, url, req);
