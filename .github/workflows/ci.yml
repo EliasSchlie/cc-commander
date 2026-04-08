@@ -8,9 +8,13 @@ name: CI
 #   - "Swift package + macOS app"  (jobs.swift)
 # Renaming any of these without updating the protection rule will
 # silently make every PR unmergeable -- the rule waits forever for a
-# check that no longer exists. Update both at once via:
-#   gh api -X PUT repos/EliasSchlie/cc-commander/branches/main/protection ...
-# (see the `required_status_checks.contexts` array).
+# check that no longer exists. To keep both in sync, first GET the
+# current rule, edit `required_status_checks.contexts`, then PUT the
+# full payload back -- a partial PUT silently wipes the unspecified
+# fields:
+#   gh api repos/EliasSchlie/cc-commander/branches/main/protection \
+#     | jq '...'  # edit contexts here
+#     | gh api -X PUT repos/EliasSchlie/cc-commander/branches/main/protection --input -
 
 on:
   push:
