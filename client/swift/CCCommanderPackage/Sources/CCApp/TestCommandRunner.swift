@@ -228,6 +228,10 @@ public final class TestCommandRunner {
             await harness.logout()
             return ["state": "disconnected"]
 
+        case "panic":
+            try await harness.panic()
+            return ["state": "disconnected"]
+
         case "startSession":
             let machineId = try requiredString(args, "machineId")
             let directory = try requiredString(args, "directory")

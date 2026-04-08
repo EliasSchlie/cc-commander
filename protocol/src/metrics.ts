@@ -31,6 +31,7 @@ export const HUB_METRIC = {
   DROPPED_TOOL_BLOCK: "hub.dropped_tool_block",
   RATE_LIMITED: "hub.rate_limited",
   OVERSIZED_FRAME: "hub.oversized_frame",
+  PANIC_TRIGGERED: "hub.panic_triggered",
 } as const;
 
 export const RUNNER_METRIC = {

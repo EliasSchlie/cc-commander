@@ -16,6 +16,9 @@ public protocol AuthClientProtocol: Sendable {
     func login(email: String, password: String) async throws -> TokenPair
     func register(email: String, password: String) async throws -> TokenPair
     func refresh(refreshToken: String) async throws -> TokenPair
+    /// Panic button: revoke all refresh tokens and kick all sessions for
+    /// the caller's account. Expects HTTP 204 on success.
+    func panic(token: String) async throws
 }
 
 /// Production auth client using URLSession.
@@ -38,6 +41,22 @@ public struct AuthClient: AuthClientProtocol {
 
     public func refresh(refreshToken: String) async throws -> TokenPair {
         try await post(path: "/api/auth/refresh", body: RefreshRequest(refreshToken: refreshToken))
+    }
+
+    public func panic(token: String) async throws {
+        let url = baseURL.appendingPathComponent("/api/auth/panic")
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+
+        let (data, response) = try await session.data(for: request)
+        guard let http = response as? HTTPURLResponse else {
+            throw AuthError.invalidResponse
+        }
+        guard http.statusCode == 204 else {
+            let errorBody = try? JSONDecoder().decode(AuthErrorResponse.self, from: data)
+            throw AuthError.serverError(http.statusCode, errorBody?.error ?? "Unknown error")
+        }
     }
 
     private func post<T: Encodable>(path: String, body: T) async throws -> TokenPair {
@@ -106,5 +125,13 @@ public actor MockAuthClient: AuthClientProtocol {
     public func refresh(refreshToken: String) async throws -> TokenPair {
         refreshCallCount += 1
         return try refreshResult.get()
+    }
+
+    public var panicResult: Result<Void, Error> = .success(())
+    public private(set) var panicCallCount = 0
+
+    public func panic(token: String) async throws {
+        panicCallCount += 1
+        try panicResult.get()
     }
 }

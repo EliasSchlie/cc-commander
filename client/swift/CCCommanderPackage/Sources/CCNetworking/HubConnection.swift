@@ -140,6 +140,21 @@ public final class HubConnection {
         state = .disconnected
     }
 
+    /// Panic: POST /api/auth/panic with the current JWT, then clear
+    /// local tokens and drop the connection. The hub will have already
+    /// closed the WebSocket with code 4003 by the time this returns, so
+    /// `logout()` is the clean-up path: it clears the keychain and
+    /// resets state so the UI bounces back to the login screen.
+    public func panic() async throws {
+        guard let token = keychain.jwt else {
+            log.error("panic called with no stored jwt")
+            throw HubConnectionError.noStoredTokens
+        }
+        log.warn("panic triggered by user")
+        try await authClient.panic(token: token)
+        await logout()
+    }
+
     // MARK: - Commands
 
     public func startSession(machineId: String, directory: String, prompt: String) async throws {
