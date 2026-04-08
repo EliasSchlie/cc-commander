@@ -72,16 +72,17 @@ if you self-host:
   password manager, not reused anywhere else.
 - Runners installed only under user accounts you would be willing to
   hand an attacker.
-- Once it lands: hardware-key (Yubikey) signed git tags, with runner
-  self-update verifying signatures before applying.
-- Once it lands: `npm ci --ignore-scripts` in the runner self-update
-  path, so a malicious dep cannot execute during install.
-- Once it lands: manual operator approval for runner self-updates
-  (push notification to the client app, operator taps "apply").
+- Once it lands (#89): hardware-key (Yubikey) signed git tags, with
+  runner self-update verifying signatures before applying.
+- A "panic button" that revokes all tokens and kicks all sessions with
+  one tap, for fast recovery if you ever see something weird (#88).
 
-Until those hardening items land, the supply chain (GitHub, npm, the
-Claude Agent SDK) is where the concentrated residual risk lives. Treat
-it accordingly.
+The supply chain (GitHub, npm, the Claude Agent SDK) is where the
+concentrated residual risk lives, and it is accepted as a known
+limitation of this deployment model: the maintainer has chosen to
+keep runner self-update fully automatic and to not gate `npm ci` on
+`--ignore-scripts`, trading those defenses for lower day-to-day
+friction. Treat that trade accordingly.
 
 ## Reporting vulnerabilities
 
@@ -95,20 +96,36 @@ around a day job. Thank you for reporting anyway.
 
 ## Known limitations and unfixed risks
 
-These are tracked as issues in the hardening tracker. Numbers below are
-placeholders that the maintainer will replace with real issue numbers.
+Tracked as issues in the hardening tracker:
 
-- `#TODO-tailscale`: document and default to Tailscale-only deployment
-  (partially addressed by this file and `DEPLOY.md`).
-- `#TODO-signed-tags`: hardware-key signed git tags, with runner-side
-  signature verification before self-update.
-- `#TODO-ignore-scripts`: switch the runner self-update to `npm ci
-  --ignore-scripts`, audit which packages actually need postinstall.
-- `#TODO-manual-update-approval`: require explicit operator approval
-  in the client app before a runner applies a pending self-update.
-- `#TODO-token-rotation`: short-lived registration tokens with
-  rotation, so a stolen `runner.json` expires on its own.
-- `#TODO-2fa`: hardware-key 2FA on hub login.
+- #88: panic button that revokes all tokens and kicks all sessions in
+  one call, for fast recovery if the operator sees something suspicious.
+- #89: hardware-key signed git tags, with runner-side signature
+  verification before self-update. Closes the "maintainer GitHub
+  account compromised, malicious push cascades to every runner in
+  five minutes" vector.
+
+**Explicitly accepted, not tracked:**
+
+- Runner self-update runs `npm ci` with install scripts enabled. A
+  malicious transitive dep could execute during install. Mitigated
+  only by keeping the dep tree small and watching for advisories;
+  `--ignore-scripts` would fix this at a real ergonomic cost and has
+  been declined for now.
+- Runner self-update is fully automatic (poll, pull, restart). A
+  malicious tag (once signing is in place per #89, this requires the
+  signing key; before that, it requires GitHub push access) runs on
+  every linked machine within the poll interval. Manual per-update
+  operator approval would close this gap but adds a tap-to-approve
+  ritual per release, which has been declined.
+- No multi-factor auth on hub login. A stolen password is account
+  takeover. Mitigated by strong password + Tailscale-only network
+  reachability (credential stuffing cannot reach the hub at all).
+- Registration tokens in `~/.config/cc-commander/runner.json` never
+  expire and never rotate. Stolen runner.json is permanent runner
+  access until manually revoked. Mitigated by file mode 0600 and by
+  Tailscale-only deployment, and by the panic button (#88) as a
+  recovery path.
 
 If you find a hardening gap that is not on this list, please report it
 (see above).
