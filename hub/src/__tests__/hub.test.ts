@@ -1072,13 +1072,13 @@ describe("metrics counters", () => {
   it("rejects oversized client frames with close 1009 and counts the metric", async () => {
     const tokens = await auth.register("user@test.com", "pass");
     const clientWs = await connectClient(tokens.token);
-    await new Promise((r) => setTimeout(r, 50));
 
     const closed = new Promise<number>((resolve) => {
       clientWs.on("close", (code) => resolve(code));
     });
-    // 5 MiB payload, comfortably above the 4 MiB cap.
-    const huge = "x".repeat(5 * 1024 * 1024);
+    // One byte over the 4 MiB cap. Probes the boundary directly and
+    // keeps per-test allocation small.
+    const huge = "x".repeat(4 * 1024 * 1024 + 1);
     clientWs.send(
       JSON.stringify({ type: "send_prompt", sessionId: "s", prompt: huge }),
     );
@@ -1088,20 +1088,20 @@ describe("metrics counters", () => {
 
     const snap = hub.metrics.snapshot();
     assert.equal(snap["hub.oversized_frame{endpoint=client}"], 1);
+
+    await closeWs(clientWs);
   });
 
   it("rejects oversized runner frames with close 1009 and counts the metric", async () => {
-    const tokens = await auth.register("user@test.com", "pass");
+    await auth.register("user@test.com", "pass");
     const account = db.getAccountByEmail("user@test.com")!;
     const machine = db.createMachine(account.id, "m");
     const runnerWs = await connectRunner(machine.registrationToken);
-    void tokens;
-    await new Promise((r) => setTimeout(r, 50));
 
     const closed = new Promise<number>((resolve) => {
       runnerWs.on("close", (code) => resolve(code));
     });
-    const huge = "x".repeat(5 * 1024 * 1024);
+    const huge = "x".repeat(4 * 1024 * 1024 + 1);
     runnerWs.send(
       JSON.stringify({ type: "stream_text", sessionId: "s", content: huge }),
     );
@@ -1111,6 +1111,8 @@ describe("metrics counters", () => {
 
     const snap = hub.metrics.snapshot();
     assert.equal(snap["hub.oversized_frame{endpoint=runner}"], 1);
+
+    await closeWs(runnerWs);
   });
 });
 
