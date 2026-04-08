@@ -83,7 +83,6 @@ struct AppStateTests {
     @Test func sessionStatusUpdatesSessionAndStream() {
         let state = makeAppState()
         state.handleMessage(.sessionList(makeSessions()))
-        // Set stream to running first so the transition triggers a flush
         state.sessionStreams["s1"] = SessionStream(sessionId: "s1")
         state.sessionStreams["s1"]?.status = .running
 

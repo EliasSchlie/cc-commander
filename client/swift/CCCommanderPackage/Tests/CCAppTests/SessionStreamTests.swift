@@ -378,9 +378,10 @@ struct SessionStreamTests {
         }
     }
 
-    // Prevents: marker coalescing math drifting after a flushPendingText()
-    // in the middle of an evicting session -- the marker count must
-    // accumulate across the flush.
+    // Prevents: marker coalescing math drifting when a flushPendingText()
+    // (which itself appends an entry through `appendEntry`) lands in the
+    // middle of an evicting session -- the marker count must accumulate
+    // across the flush instead of producing a second marker.
     @Test func evictionMarkerCoalescesAcrossFlush() {
         let stream = SessionStream(sessionId: "s1")
         let cap = SessionStream.maxEntries
@@ -392,6 +393,9 @@ struct SessionStreamTests {
         } else {
             Issue.record("expected marker after first batch")
         }
+        // Stream partial text and flush, so the flush actually appends an
+        // entry through `appendEntry` (and triggers another overflow trim).
+        stream.appendText("partial text")
         stream.flushPendingText()
         for i in 0..<30 {
             stream.addError("late\(i)")
@@ -402,7 +406,9 @@ struct SessionStreamTests {
         }
         #expect(markers.count == 1)
         if case .evictionMarker(_, let dropped) = stream.entries.first {
-            #expect(dropped == 50)
+            // 20 from the first batch + 1 from the flush + 30 from the
+            // late batch = 51 evicted entries, all coalesced into one marker.
+            #expect(dropped == 51)
         } else {
             Issue.record("expected coalesced marker")
         }
