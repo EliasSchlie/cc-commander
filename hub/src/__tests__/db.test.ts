@@ -105,8 +105,11 @@ describe("sessions", () => {
     assert.equal(updated.sdkSessionId, "sdk-uuid-123");
   });
 
-  // Prevents: sessions stuck in 'running' forever after the runner disconnects
-  it("marks non-idle sessions as errored for a machine", () => {
+  // Prevents: sessions stuck in 'running' forever after the runner disconnects.
+  // Previously these were marked as `error: Runner disconnected`, but the
+  // SDK conversation jsonl on disk is intact so the runner can resume on
+  // reconnect (see hub_runner_resync). Idle is the honest description.
+  it("demotes non-idle sessions to idle for a machine", () => {
     const running = db.createSession(accountId, machineId, "/a", "running");
     const waiting = db.createSession(
       accountId,
@@ -117,30 +120,69 @@ describe("sessions", () => {
     const idle = db.createSession(accountId, machineId, "/c", "idle");
     const errored = db.createSession(accountId, machineId, "/d", "error");
 
-    const affected = db.markSessionsErrorForMachine(machineId, "Runner gone");
+    // Seed previews so we can verify they survive the demotion -- the
+    // sidebar should still show "...applying patch" not "Runner gone".
+    db.updateSessionStatus(running.id, "running", "Edit foo.ts");
+    db.updateSessionStatus(waiting.id, "waiting_for_input", "Run tests?");
+
+    const affected = db.markSessionsIdleForMachine(machineId);
     assert.equal(affected, 2);
 
-    assert.equal(db.getSessionById(running.id)!.status, "error");
+    assert.equal(db.getSessionById(running.id)!.status, "idle");
     assert.equal(
       db.getSessionById(running.id)!.lastMessagePreview,
-      "Runner gone",
+      "Edit foo.ts",
     );
-    assert.equal(db.getSessionById(waiting.id)!.status, "error");
+    assert.equal(db.getSessionById(waiting.id)!.status, "idle");
+    assert.equal(
+      db.getSessionById(waiting.id)!.lastMessagePreview,
+      "Run tests?",
+    );
     // idle and already-errored sessions are untouched
     assert.equal(db.getSessionById(idle.id)!.status, "idle");
     assert.equal(db.getSessionById(errored.id)!.status, "error");
   });
 
   // Prevents: marking sessions on one machine accidentally affecting another machine
-  it("only errors sessions on the specified machine", () => {
+  it("only idles sessions on the specified machine", () => {
     const otherMachine = db.createMachine(accountId, "Other").id;
     const a = db.createSession(accountId, machineId, "/a", "running");
     const b = db.createSession(accountId, otherMachine, "/b", "running");
 
-    db.markSessionsErrorForMachine(machineId, "gone");
+    db.markSessionsIdleForMachine(machineId);
 
-    assert.equal(db.getSessionById(a.id)!.status, "error");
+    assert.equal(db.getSessionById(a.id)!.status, "idle");
     assert.equal(db.getSessionById(b.id)!.status, "running");
+  });
+
+  // Prevents: runner reconnect not getting back its sdkSessionId map,
+  // which would cause the next prompt on a pre-existing session to
+  // start a fresh SDK conversation with no `resume:`.
+  it("lists resumable sessions for a machine", () => {
+    const a = db.createSession(accountId, machineId, "/a", "idle");
+    const b = db.createSession(accountId, machineId, "/b", "idle");
+    const c = db.createSession(accountId, machineId, "/c", "idle");
+    db.updateSessionSdkId(a.id, "sdk-a");
+    db.updateSessionSdkId(b.id, "sdk-b");
+    // c has no sdk_session_id -- excluded
+
+    const resumable = db.listResumableSessionsForMachine(machineId);
+    const ids = new Set(resumable.map((r) => r.sessionId));
+    assert.equal(resumable.length, 2);
+    assert.ok(ids.has(a.id));
+    assert.ok(ids.has(b.id));
+    assert.ok(!ids.has(c.id));
+    const aEntry = resumable.find((r) => r.sessionId === a.id)!;
+    assert.equal(aEntry.sdkSessionId, "sdk-a");
+  });
+
+  it("excludes archived sessions from the resumable list", () => {
+    const a = db.createSession(accountId, machineId, "/a", "idle");
+    db.updateSessionSdkId(a.id, "sdk-a");
+    db.archiveSession(a.id, accountId);
+
+    const resumable = db.listResumableSessionsForMachine(machineId);
+    assert.equal(resumable.length, 0);
   });
 });
 
