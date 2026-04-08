@@ -9,7 +9,147 @@ This walks through a real three-machine deployment:
 You can run all three on the same machine for testing — see the "Local
 all-in-one" section at the bottom.
 
+See [`SECURITY.md`](SECURITY.md) for the threat model before choosing
+between the two deployment paths below.
+
 ---
+
+## Recommended: Tailscale-only deployment (personal use)
+
+This is the recommended deployment for personal / solo use. It is
+significantly safer than exposing the hub on the public internet: the
+hub is unreachable except from devices on your tailnet, which kills
+mass scanning, credential stuffing, brute force, and any external
+0-day against the hub's HTTP / WebSocket surface in one shot.
+
+Residual risk after this deployment is concentrated in the supply
+chain (GitHub, npm, the Claude Agent SDK). That is tracked separately
+in [`SECURITY.md`](SECURITY.md).
+
+### 1. Install Tailscale everywhere
+
+- On the **hub VPS**: follow the Tailscale Linux instructions,
+  `sudo tailscale up`, and note the resulting tailnet IP (e.g.
+  `100.64.0.5`) and MagicDNS name (e.g. `hub.tail1234.ts.net`).
+- On each **runner machine** (Mac Mini, MacBook, ...): install the
+  Tailscale app (or `brew install --cask tailscale`), sign in, and
+  confirm the device shows up in the admin console.
+- On each **client device** (iPhone, Mac laptop, ...): install the
+  Tailscale app from the App Store, sign in, and confirm it can ping
+  the hub's tailnet IP.
+
+### 2. Run the hub bound to the tailnet only
+
+Two options, pick one.
+
+**Option A (simplest): bind the container to the tailnet IP.**
+Edit `hub/docker-compose.yml` and change the port mapping from
+`127.0.0.1:3000:3000` to your tailnet IP, e.g. `100.64.0.5:3000:3000`.
+Start the hub with `docker compose up -d`. Skip the reverse proxy
+step in the alternative section entirely. No TLS, no public DNS, no
+Caddy, no nginx. The hub is reachable only from devices on your
+tailnet, over WireGuard.
+
+**Option B (cleanest, with TLS): `tailscale serve`.** Leave the
+compose file bound to `127.0.0.1:3000` and put Tailscale in front of
+it:
+
+```sh
+sudo tailscale serve --bg --https=443 http://127.0.0.1:3000
+```
+
+This gives you a real HTTPS endpoint at
+`https://hub.tail1234.ts.net` with a free cert provisioned by
+`tailscale cert`, reachable only from your tailnet. WebSocket
+upgrades work out of the box. You do not need Caddy or nginx.
+
+### 3. Point the client app at the hub's MagicDNS name
+
+Use the MagicDNS name, not the raw tailnet IP, so the Tailscale cert
+(option B) validates and so the URL keeps working if the VPS is
+recreated.
+
+```sh
+# Option A, no TLS
+defaults write com.cc-commander.app HubBaseURL http://hub.tail1234.ts.net:3000
+
+# Option B, tailscale serve with TLS
+defaults write com.cc-commander.app HubBaseURL https://hub.tail1234.ts.net
+```
+
+iOS: bake the URL into the build (see "Option B" under the macOS
+client app section below) since there is no defaults trick for a
+device build yet.
+
+### 4. Register runners the same way, using the tailnet URL
+
+Use whichever scheme matches the option you picked above. With
+Option A (no TLS) the hub speaks plain HTTP on port 3000:
+
+```sh
+node --experimental-strip-types src/cli.ts register \
+    --hub http://hub.tail1234.ts.net:3000 \
+    --email you@example.com \
+    --name "mac-mini-living-room"
+```
+
+With Option B (`tailscale serve` with TLS) the hub is reachable
+over HTTPS on the default port:
+
+```sh
+node --experimental-strip-types src/cli.ts register \
+    --hub https://hub.tail1234.ts.net \
+    --email you@example.com \
+    --name "mac-mini-living-room"
+```
+
+Everything else in the "Runner on a Mac" section below still applies.
+
+### 5. Optional: lock it down with Tailscale ACLs
+
+By default every device on your tailnet can talk to every other
+device on every port. You can tighten this so that only your client
+devices can reach the hub, and runners are only allowed to egress
+to the hub (not to each other, not to clients). Edit your tailnet
+policy in the Tailscale admin console. The example below uses
+`tag:hub:443` (Option B); if you went with Option A, swap the two
+`dst` entries to `tag:hub:3000`.
+
+```json
+{
+  "tagOwners": {
+    "tag:hub":    ["autogroup:admin"],
+    "tag:runner": ["autogroup:admin"],
+    "tag:client": ["autogroup:admin"]
+  },
+  "acls": [
+    { "action": "accept", "src": ["tag:client"], "dst": ["tag:hub:443"] },
+    { "action": "accept", "src": ["tag:runner"], "dst": ["tag:hub:443"] }
+  ]
+}
+```
+
+Tag each device accordingly in the admin console. Clients can reach
+the hub, runners can reach the hub, nothing else can reach anything.
+
+### 6. Optional: enable tailnet lock
+
+For the paranoid: turn on tailnet lock in the Tailscale admin console
+so that new nodes joining your tailnet must be signed by an existing
+trusted node. This prevents a compromised Tailscale control plane
+from silently adding a new device to your tailnet.
+
+---
+
+## Alternative: public hub on a VPS (advanced)
+
+> Warning: this path significantly increases attack surface. A public
+> hub is exposed to mass scanning, credential stuffing, and any
+> external 0-day against the hub's HTTP / WebSocket surface. Only use
+> it if you know what you are doing, set a strong unique password, and
+> are prepared to keep up with the hardening tracker in
+> [`SECURITY.md`](SECURITY.md). For personal use, prefer the
+> Tailscale-only deployment above.
 
 ## 1. Hub on a VPS
 
