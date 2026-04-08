@@ -463,10 +463,23 @@ export class Hub {
     this.runners.set(machine.id, conn);
     this.config.db.updateMachineLastSeen(machine.id);
     this.broadcastMachineList(machine.accountId);
+    // Replay the resume map to the runner. Without this, a runner
+    // restart silently loses session history because the next prompt
+    // starts a fresh SDK conversation with no `resume:`. Sent
+    // unconditionally -- the runner relies on exactly one resync per
+    // connect, even when empty.
+    const resumable = this.config.db.listResumableSessionsForMachine(
+      machine.id,
+    );
+    this.sendToRunner(conn, {
+      type: "hub_runner_resync",
+      sessions: resumable,
+    });
     this.log.info("runner connected", {
       machineId: machine.id,
       machineName: machine.name,
       accountId: machine.accountId,
+      resyncCount: resumable.length,
     });
 
     ws.on("message", (data) => {
@@ -485,10 +498,11 @@ export class Hub {
     ws.on("close", () => {
       if (this.runners.get(machine.id)?.ws === ws) {
         this.runners.delete(machine.id);
-        const affected = this.config.db.markSessionsErrorForMachine(
-          machine.id,
-          "Runner disconnected",
-        );
+        // Demote active sessions to idle, not error: the SDK jsonl is
+        // intact and the runner will resume them on reconnect via the
+        // resync above. Machine offline-ness is surfaced separately
+        // through `enrichedMachineList`.
+        const affected = this.config.db.markSessionsIdleForMachine(machine.id);
         // Reply will never come from a disconnected runner.
         this.pendingHistory.dropMatching(
           (entry) => entry.machineId === machine.id,
@@ -501,7 +515,7 @@ export class Hub {
           machineId: machine.id,
           machineName: machine.name,
           accountId: machine.accountId,
-          sessionsErrored: affected,
+          sessionsIdled: affected,
         });
       }
     });

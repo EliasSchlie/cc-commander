@@ -602,3 +602,173 @@ describe("protocol validation", () => {
     runner.disconnect();
   });
 });
+
+// ── Resync (runner restart recovery) ────────────────────────────────────
+
+describe("hub_runner_resync", () => {
+  // Prevents: runner restart causing the next prompt on a pre-existing
+  // session to start a fresh SDK conversation. The runner has no
+  // on-disk state for sdkSessionIds; the hub replays them on connect
+  // and the runner must use them as the `resume:` arg on the SDK call.
+  it("populates sdkSessionIds and resumes the right SDK session", async () => {
+    let capturedResume: string | undefined;
+    const runner = new MachineRunner({
+      hubUrl: `ws://localhost:${hubPort}`,
+      registrationToken: "test-token",
+      machineName: "Test",
+      queryFn: ((args: { prompt: string; options: { resume?: string } }) => {
+        capturedResume = args.options.resume;
+        async function* gen() {
+          yield {
+            type: "result",
+            session_id: args.options.resume ?? "sdk-fresh",
+            num_turns: 1,
+            duration_ms: 1,
+          };
+        }
+        return gen();
+      }) as any,
+    });
+    await runner.connect();
+    await waitForRunnerMsg((m) => m.type === "runner_hello");
+
+    // Simulate the hub pushing the resync immediately after registering
+    // the runner. Two entries: only s-existing should win when its
+    // prompt arrives.
+    sendToRunner({
+      type: "hub_runner_resync",
+      sessions: [
+        { sessionId: "s-existing", sdkSessionId: "sdk-restored" },
+        { sessionId: "s-other", sdkSessionId: "sdk-other" },
+      ],
+    });
+    await new Promise((r) => setTimeout(r, 50));
+
+    // The user sends a follow-up prompt on the pre-existing session.
+    sendToRunner({
+      type: "hub_send_prompt",
+      sessionId: "s-existing",
+      prompt: "what were we doing?",
+    });
+    await new Promise((r) => setTimeout(r, 200));
+
+    assert.equal(
+      capturedResume,
+      "sdk-restored",
+      "runner must pass the restored sdkSessionId as `resume:`",
+    );
+    runner.disconnect();
+  });
+
+  // Prevents: a stale sdkSessionId from a prior in-memory state
+  // surviving across a resync, which would let the runner resume
+  // into a session the hub has forgotten about. Verified via the
+  // wire: a follow-up prompt on the stale session must NOT pass
+  // `resume:`, while one on a freshly-resync'd session must.
+  it("replaces the in-memory map outright on resync", async () => {
+    const resumesByPrompt = new Map<string, string | undefined>();
+    const runner = new MachineRunner({
+      hubUrl: `ws://localhost:${hubPort}`,
+      registrationToken: "test-token",
+      machineName: "Test",
+      queryFn: ((args: { prompt: string; options: { resume?: string } }) => {
+        resumesByPrompt.set(args.prompt, args.options.resume);
+        const sid = args.options.resume ?? "sdk-from-query";
+        async function* gen() {
+          yield { type: "system", subtype: "init", session_id: sid };
+          yield {
+            type: "result",
+            session_id: sid,
+            num_turns: 1,
+            duration_ms: 1,
+          };
+        }
+        return gen();
+      }) as any,
+    });
+    await runner.connect();
+    await waitForRunnerMsg((m) => m.type === "runner_hello");
+
+    // Plant a stale entry by completing a session: the runner copies
+    // the SDK id into sdkSessionIds in the finally block.
+    sendToRunner({
+      type: "hub_start_session",
+      sessionId: "s-stale",
+      directory: "/tmp",
+      prompt: "plant",
+    });
+    await new Promise((r) => setTimeout(r, 200));
+    assert.equal(resumesByPrompt.get("plant"), undefined);
+
+    // Resync says: only s-fresh exists.
+    sendToRunner({
+      type: "hub_runner_resync",
+      sessions: [{ sessionId: "s-fresh", sdkSessionId: "sdk-fresh" }],
+    });
+    await new Promise((r) => setTimeout(r, 50));
+
+    // Follow-up on the stale session: must NOT carry resume.
+    sendToRunner({
+      type: "hub_send_prompt",
+      sessionId: "s-stale",
+      prompt: "stale-followup",
+    });
+    // Follow-up on the fresh session: must carry sdk-fresh.
+    sendToRunner({
+      type: "hub_send_prompt",
+      sessionId: "s-fresh",
+      prompt: "fresh-followup",
+    });
+    await new Promise((r) => setTimeout(r, 300));
+
+    assert.equal(
+      resumesByPrompt.get("stale-followup"),
+      undefined,
+      "stale session must restart fresh after resync drops it",
+    );
+    assert.equal(
+      resumesByPrompt.get("fresh-followup"),
+      "sdk-fresh",
+      "fresh session must resume with the resync'd id",
+    );
+    runner.disconnect();
+  });
+
+  // Prevents: post-session LRU eviction kicking out the most-recently-
+  // active session instead of the oldest. The hub sends sessions in
+  // most-recently-active-first order; if handleResync inserts in that
+  // order, the Map's iteration order puts MRU first, and the
+  // `keys().next().value` eviction in runSession's finally block then
+  // evicts the wrong end.
+  it("preserves LRU order under post-resync cap eviction", async () => {
+    const runner = new MachineRunner({
+      hubUrl: `ws://localhost:${hubPort}`,
+      registrationToken: "test-token",
+      machineName: "Test",
+      queryFn: mockQueryWithResult("done", "sdk-x"),
+    });
+    await runner.connect();
+    await waitForRunnerMsg((m) => m.type === "runner_hello");
+
+    // Resync in MRU-first order, the wire convention.
+    sendToRunner({
+      type: "hub_runner_resync",
+      sessions: [
+        { sessionId: "s-newest", sdkSessionId: "sdk-newest" },
+        { sessionId: "s-middle", sdkSessionId: "sdk-middle" },
+        { sessionId: "s-oldest", sdkSessionId: "sdk-oldest" },
+      ],
+    });
+    await new Promise((r) => setTimeout(r, 50));
+
+    // The first key in iteration order is the eviction victim. It
+    // should be the OLDEST (s-oldest), not the newest.
+    const firstKey = runner.sdkSessionIds.keys().next().value;
+    assert.equal(
+      firstKey,
+      "s-oldest",
+      "oldest entry must be at the head of the eviction order",
+    );
+    runner.disconnect();
+  });
+});

@@ -16,6 +16,17 @@
 
 export type SessionStatus = "running" | "idle" | "waiting_for_input" | "error";
 
+// ── Resync bounds ───────────────────────────────────────────────────────
+
+/**
+ * Cap on how many `sessionId → sdkSessionId` mappings the hub replays
+ * to a runner on connect, and on how many entries the runner stores in
+ * its in-memory map. Single source of truth so the two sides can't
+ * drift -- a runner with a smaller cap than the hub would silently drop
+ * resume info for older sessions.
+ */
+export const MAX_RESUMABLE_SESSIONS = 1000;
+
 // ── Session metadata ────────────────────────────────────────────────────
 
 export interface SessionMeta {
@@ -122,11 +133,29 @@ export interface HubGetHistoryMsg {
   requestId: string;
 }
 
+/**
+ * Replays the resume map to a (re)connecting runner. Sent exactly once
+ * per connect, immediately after the hub registers the runner -- even
+ * when empty -- so the runner can rebuild `sessionId → sdkSessionId`
+ * after a restart. Without it, the next prompt on a pre-existing
+ * session starts a fresh SDK conversation with no `resume:`.
+ */
+export interface HubRunnerResyncMsg {
+  type: "hub_runner_resync";
+  sessions: ResumableSession[];
+}
+
+export interface ResumableSession {
+  sessionId: string;
+  sdkSessionId: string;
+}
+
 export type HubToRunnerMsg =
   | HubStartSessionMsg
   | HubSendPromptMsg
   | HubRespondToPromptMsg
-  | HubGetHistoryMsg;
+  | HubGetHistoryMsg
+  | HubRunnerResyncMsg;
 
 // ── Messages: Runner -> Hub ──────────────────────────────────────────────
 
@@ -320,11 +349,15 @@ const RUNNER_MSG_REQUIRED_FIELDS: Record<
   runner_hello: ["machineName"],
 };
 
-const HUB_MSG_REQUIRED_FIELDS: Record<string, readonly string[]> = {
+const HUB_MSG_REQUIRED_FIELDS: Record<
+  HubToRunnerMsg["type"],
+  readonly string[]
+> = {
   hub_start_session: ["sessionId", "directory", "prompt"],
   hub_send_prompt: ["sessionId", "prompt"],
   hub_respond_to_prompt: ["sessionId", "promptId", "response"],
   hub_get_history: ["sessionId", "requestId"],
+  hub_runner_resync: ["sessions"],
 };
 
 function validateFields(
@@ -404,7 +437,7 @@ export function parseRunnerMessage(data: string): RunnerToHubMsg {
 
 export function parseHubMessage(data: string): HubToRunnerMsg {
   const msg = parseEnvelope(data);
-  const fields = HUB_MSG_REQUIRED_FIELDS[msg.type as string];
+  const fields = HUB_MSG_REQUIRED_FIELDS[msg.type as HubToRunnerMsg["type"]];
   if (!fields) {
     throw new MessageValidationError(
       `Unknown hub message type: ${msg.type as string}`,
@@ -412,13 +445,14 @@ export function parseHubMessage(data: string): HubToRunnerMsg {
   }
   validateFields(msg, fields);
   // The runner is the most exposed parser surface (it executes the
-  // received commands), so it gets the strictest validation. Every
-  // listed field on a hub→runner message is a string id/path/prompt
+  // received commands), so it gets the strictest validation. Most
+  // listed fields on hub→runner messages are string ids/paths/prompts
   // -- empty strings would silently produce broken sessions
   // downstream. Match the pre-#29 runner-side parser which rejected
-  // them at the boundary.
+  // them at the boundary. Non-string fields (`response`, `sessions`)
+  // are checked separately below.
   for (const field of fields) {
-    if (field === "response") continue;
+    if (field === "response" || field === "sessions") continue;
     if (typeof msg[field] !== "string" || (msg[field] as string).length === 0) {
       throw new MessageValidationError(
         `Invalid ${msg.type as string}: field "${field}" must be a non-empty string`,
@@ -432,6 +466,29 @@ export function parseHubMessage(data: string): HubToRunnerMsg {
     throw new MessageValidationError(
       'Invalid hub_respond_to_prompt: missing or invalid "response"',
     );
+  }
+  // hub_runner_resync carries an array of {sessionId, sdkSessionId}.
+  // Validate shape and reject malformed entries -- runner indexes by
+  // sessionId, so an empty/missing id would silently corrupt the map.
+  if (msg.type === "hub_runner_resync") {
+    if (!Array.isArray(msg.sessions)) {
+      throw new MessageValidationError(
+        'Invalid hub_runner_resync: "sessions" must be an array',
+      );
+    }
+    for (const entry of msg.sessions as unknown[]) {
+      if (
+        !isObjectShape(entry) ||
+        typeof entry.sessionId !== "string" ||
+        entry.sessionId.length === 0 ||
+        typeof entry.sdkSessionId !== "string" ||
+        entry.sdkSessionId.length === 0
+      ) {
+        throw new MessageValidationError(
+          "Invalid hub_runner_resync: each entry needs non-empty sessionId and sdkSessionId",
+        );
+      }
+    }
   }
   return msg as unknown as HubToRunnerMsg;
 }

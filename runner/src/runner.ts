@@ -2,7 +2,11 @@ import { statSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import { WebSocket } from "ws";
 import { query, getSessionMessages } from "@anthropic-ai/claude-agent-sdk";
-import { parseHubMessage, serialize } from "@cc-commander/protocol";
+import {
+  parseHubMessage,
+  serialize,
+  MAX_RESUMABLE_SESSIONS,
+} from "@cc-commander/protocol";
 import { Metrics, RUNNER_METRIC } from "@cc-commander/protocol/metrics";
 import { createLogger, type Logger } from "@cc-commander/protocol/logger";
 import type {
@@ -15,7 +19,6 @@ import type {
 type DroppedToolBlockPayload = Omit<DroppedToolBlockMsg, "type" | "sessionId">;
 
 const ASK_USER_TOOL = "AskUserQuestion";
-const MAX_SDK_SESSION_IDS = 1000;
 
 interface ActiveSession {
   sessionId: string;
@@ -184,11 +187,43 @@ export class MachineRunner {
       case "hub_get_history":
         this.getHistory(msg.sessionId, msg.requestId);
         break;
+      case "hub_runner_resync":
+        this.handleResync(msg.sessions);
+        break;
       default:
         this.log.warn("unhandled hub message type", {
           msgType: (msg as any).type,
         });
     }
+  }
+
+  /**
+   * Repopulate `sdkSessionIds` from the hub on (re)connect. Without
+   * this, a runner restart would resolve every existing session's SDK
+   * id to undefined and start a fresh conversation with no `resume:`,
+   * dropping all history. Replaces the map outright -- the hub's view
+   * is canonical and any stale local entries should be dropped. The
+   * slice is a protocol-boundary cap against an oversized payload.
+   *
+   * The hub sends sessions in most-recently-active-first order.
+   * `sdkSessionIds` uses Map insertion order as its LRU proxy (the
+   * post-session eviction in the `runSession` finally block calls
+   * `keys().next().value`), so we insert in reverse so the oldest
+   * lands first and gets evicted first under cap pressure.
+   */
+  private handleResync(
+    sessions: ReadonlyArray<{ sessionId: string; sdkSessionId: string }>,
+  ): void {
+    this.sdkSessionIds = new Map();
+    const capped = sessions.slice(0, MAX_RESUMABLE_SESSIONS);
+    for (let i = capped.length - 1; i >= 0; i--) {
+      const { sessionId, sdkSessionId } = capped[i]!;
+      this.sdkSessionIds.set(sessionId, sdkSessionId);
+    }
+    this.log.info("runner resync applied", {
+      received: sessions.length,
+      applied: capped.length,
+    });
   }
 
   private resolveSdkSessionId(sessionId: string): string | undefined {
@@ -310,7 +345,7 @@ export class MachineRunner {
       slog.debug("session cleanup", { sdkSessionId: session.sdkSessionId });
       if (session.sdkSessionId) {
         // Evict oldest entry if at capacity
-        if (this.sdkSessionIds.size >= MAX_SDK_SESSION_IDS) {
+        if (this.sdkSessionIds.size >= MAX_RESUMABLE_SESSIONS) {
           const oldest = this.sdkSessionIds.keys().next().value;
           if (oldest !== undefined) this.sdkSessionIds.delete(oldest);
         }

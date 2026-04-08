@@ -1,9 +1,11 @@
 import Database from "better-sqlite3";
 import { randomUUID } from "node:crypto";
-import type {
-  SessionMeta,
-  SessionStatus,
-  MachineInfo,
+import {
+  MAX_RESUMABLE_SESSIONS,
+  type SessionMeta,
+  type SessionStatus,
+  type MachineInfo,
+  type ResumableSession,
 } from "@cc-commander/protocol";
 
 export interface AccountRow {
@@ -106,6 +108,15 @@ export class HubDb {
     this.db.exec(
       `CREATE INDEX IF NOT EXISTS idx_sessions_account_status_ended
          ON sessions (account_id, status, ended_at);`,
+    );
+    // Index for the per-machine resync hot path: every runner connect
+    // runs listResumableSessionsForMachine, and every disconnect runs
+    // markSessionsIdleForMachine. Both filter on machine_id and need
+    // an index walk instead of a table scan to scale past trivial
+    // session counts. Covers the WHERE columns and the ORDER BY.
+    this.db.exec(
+      `CREATE INDEX IF NOT EXISTS idx_sessions_machine_resync
+         ON sessions (machine_id, archived_at, last_activity DESC);`,
     );
   }
 
@@ -347,24 +358,52 @@ export class HubDb {
     return result.changes;
   }
 
-  /** Marks all non-idle sessions on a machine as errored. Returns the number affected. */
-  markSessionsErrorForMachine(machineId: string, errorMessage: string): number {
+  /**
+   * Demotes a machine's active sessions to `idle` on runner disconnect.
+   * Not `error`: the SDK conversation jsonl on disk is intact and the
+   * next runner connect will resync the resume map (see
+   * `listResumableSessionsForMachine`). `last_message_preview` is left
+   * intact so the sidebar still shows the prior activity, not
+   * "disconnected". Returns the number affected.
+   */
+  markSessionsIdleForMachine(machineId: string): number {
     // Type anchor: rename a SessionStatus value and these will fail to compile.
-    const errorStatus: SessionStatus = "error";
+    const idleStatus: SessionStatus = "idle";
     const activeStatuses: SessionStatus[] = ["running", "waiting_for_input"];
     const placeholders = activeStatuses.map(() => "?").join(", ");
     const result = this.db
       .prepare(
-        `UPDATE sessions SET status = ?, last_message_preview = ?, error_message = ?, ended_at = datetime('now'), last_activity = datetime('now') WHERE machine_id = ? AND status IN (${placeholders})`,
+        `UPDATE sessions SET status = ?, ended_at = datetime('now'), last_activity = datetime('now') WHERE machine_id = ? AND status IN (${placeholders})`,
       )
-      .run(
-        errorStatus,
-        errorMessage,
-        errorMessage,
-        machineId,
-        ...activeStatuses,
-      );
+      .run(idleStatus, machineId, ...activeStatuses);
     return result.changes;
+  }
+
+  /**
+   * Non-archived sessions on a machine that have an SDK session id, in
+   * most-recently-active order. Sent on `hub_runner_resync` so the
+   * runner can rebuild its `sessionId → sdkSessionId` map after a
+   * restart. Capped at `MAX_RESUMABLE_SESSIONS` -- the runner's LRU
+   * uses the same constant.
+   */
+  listResumableSessionsForMachine(
+    machineId: string,
+    limit = MAX_RESUMABLE_SESSIONS,
+  ): ResumableSession[] {
+    const rows = this.db
+      .prepare(
+        `SELECT id, sdk_session_id FROM sessions
+           WHERE machine_id = ?
+             AND archived_at IS NULL
+             AND sdk_session_id IS NOT NULL
+           ORDER BY last_activity DESC
+           LIMIT ?`,
+      )
+      .all(machineId, limit) as Array<{ id: string; sdk_session_id: string }>;
+    return rows.map((r) => ({
+      sessionId: r.id,
+      sdkSessionId: r.sdk_session_id,
+    }));
   }
 
   // ── Refresh Tokens ────────────────────────────────────────────────────
