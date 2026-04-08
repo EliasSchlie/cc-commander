@@ -20,22 +20,11 @@ function connectClient(token: string): Promise<WebSocket> {
   });
 }
 
-function connectRunner(registrationToken: string): Promise<WebSocket> {
-  return new Promise((resolve, reject) => {
-    const ws = new WebSocket(
-      `ws://localhost:${port}/ws/runner?token=${registrationToken}`,
-    );
-    ws.on("open", () => resolve(ws));
-    ws.on("error", reject);
-  });
-}
-
 /**
- * Like `connectRunner` but starts buffering hub→runner messages from
- * before `open` fires, so tests can assert on messages the hub pushes
- * synchronously inside its connection handler (e.g. `hub_runner_resync`).
- * Without the early-attached buffer those messages can race the test's
- * `waitForMsg` listener and be silently dropped.
+ * Buffers hub→runner messages from before `open` fires, so tests can
+ * assert on messages the hub pushes synchronously inside its connection
+ * handler (e.g. `hub_runner_resync`). Without the early-attached buffer
+ * those messages race the test's `waitForMsg` listener and get dropped.
  */
 function connectRunnerWithBuffer(
   registrationToken: string,
@@ -51,6 +40,10 @@ function connectRunnerWithBuffer(
     ws.on("open", () => resolve({ ws, messages }));
     ws.on("error", reject);
   });
+}
+
+function connectRunner(registrationToken: string): Promise<WebSocket> {
+  return connectRunnerWithBuffer(registrationToken).then(({ ws }) => ws);
 }
 
 async function waitForBuffered(

@@ -2,7 +2,11 @@ import { statSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import { WebSocket } from "ws";
 import { query, getSessionMessages } from "@anthropic-ai/claude-agent-sdk";
-import { parseHubMessage, serialize } from "@cc-commander/protocol";
+import {
+  parseHubMessage,
+  serialize,
+  MAX_RESUMABLE_SESSIONS,
+} from "@cc-commander/protocol";
 import { Metrics, RUNNER_METRIC } from "@cc-commander/protocol/metrics";
 import { createLogger, type Logger } from "@cc-commander/protocol/logger";
 import type {
@@ -15,7 +19,6 @@ import type {
 type DroppedToolBlockPayload = Omit<DroppedToolBlockMsg, "type" | "sessionId">;
 
 const ASK_USER_TOOL = "AskUserQuestion";
-const MAX_SDK_SESSION_IDS = 1000;
 
 interface ActiveSession {
   sessionId: string;
@@ -195,24 +198,18 @@ export class MachineRunner {
   }
 
   /**
-   * Repopulate the in-memory `sessionId → sdkSessionId` map from the
-   * hub on (re)connect. The runner has no on-disk state of its own;
-   * on a process restart this map vanishes, and without resync the
-   * next `hub_send_prompt` for an existing session would resolve
-   * `sdkSessionId` to undefined and start a fresh SDK conversation
-   * with no `resume:` -- losing all history. The hub knows the
-   * mapping (it's in the DB) and pushes it here.
-   *
-   * Replaces the existing map outright: the hub's view is canonical,
-   * any stale entries from before reconnect should be dropped. The
-   * hub already caps the list, but we enforce MAX_SDK_SESSION_IDS
-   * defensively here in case the bound drifts.
+   * Repopulate `sdkSessionIds` from the hub on (re)connect. Without
+   * this, a runner restart would resolve every existing session's SDK
+   * id to undefined and start a fresh conversation with no `resume:`,
+   * dropping all history. Replaces the map outright -- the hub's view
+   * is canonical and any stale local entries should be dropped. The
+   * slice is a protocol-boundary cap against an oversized payload.
    */
   private handleResync(
     sessions: ReadonlyArray<{ sessionId: string; sdkSessionId: string }>,
   ): void {
     this.sdkSessionIds = new Map();
-    const capped = sessions.slice(0, MAX_SDK_SESSION_IDS);
+    const capped = sessions.slice(0, MAX_RESUMABLE_SESSIONS);
     for (const { sessionId, sdkSessionId } of capped) {
       this.sdkSessionIds.set(sessionId, sdkSessionId);
     }
@@ -341,7 +338,7 @@ export class MachineRunner {
       slog.debug("session cleanup", { sdkSessionId: session.sdkSessionId });
       if (session.sdkSessionId) {
         // Evict oldest entry if at capacity
-        if (this.sdkSessionIds.size >= MAX_SDK_SESSION_IDS) {
+        if (this.sdkSessionIds.size >= MAX_RESUMABLE_SESSIONS) {
           const oldest = this.sdkSessionIds.keys().next().value;
           if (oldest !== undefined) this.sdkSessionIds.delete(oldest);
         }

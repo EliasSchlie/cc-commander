@@ -16,6 +16,17 @@
 
 export type SessionStatus = "running" | "idle" | "waiting_for_input" | "error";
 
+// ── Resync bounds ───────────────────────────────────────────────────────
+
+/**
+ * Cap on how many `sessionId → sdkSessionId` mappings the hub replays
+ * to a runner on connect, and on how many entries the runner stores in
+ * its in-memory map. Single source of truth so the two sides can't
+ * drift -- a runner with a smaller cap than the hub would silently drop
+ * resume info for older sessions.
+ */
+export const MAX_RESUMABLE_SESSIONS = 1000;
+
 // ── Session metadata ────────────────────────────────────────────────────
 
 export interface SessionMeta {
@@ -123,14 +134,11 @@ export interface HubGetHistoryMsg {
 }
 
 /**
- * Sent by the hub on runner (re)connect to repopulate the runner's
- * in-memory `sessionId → sdkSessionId` map from the DB. Without this,
- * a runner restart would lose all SDK session ids and the next prompt
- * on an existing session would start a fresh SDK session (no `resume:`),
- * dropping conversation history.
- *
- * Always sent immediately after the hub registers the runner connection,
- * even if the list is empty (so the runner can rely on receiving it).
+ * Replays the resume map to a (re)connecting runner. Sent exactly once
+ * per connect, immediately after the hub registers the runner -- even
+ * when empty -- so the runner can rebuild `sessionId → sdkSessionId`
+ * after a restart. Without it, the next prompt on a pre-existing
+ * session starts a fresh SDK conversation with no `resume:`.
  */
 export interface HubRunnerResyncMsg {
   type: "hub_runner_resync";

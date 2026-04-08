@@ -463,12 +463,11 @@ export class Hub {
     this.runners.set(machine.id, conn);
     this.config.db.updateMachineLastSeen(machine.id);
     this.broadcastMachineList(machine.accountId);
-    // Resync the runner's in-memory sdkSessionId map from the DB. The
-    // runner has no on-disk state of its own, so without this its
-    // first prompt on a pre-existing session would start a fresh SDK
-    // session (no `resume:`), losing all conversation history. Always
-    // sent -- even an empty list lets the runner rely on receiving
-    // exactly one resync per connect.
+    // Replay the resume map to the runner. Without this, a runner
+    // restart silently loses session history because the next prompt
+    // starts a fresh SDK conversation with no `resume:`. Sent
+    // unconditionally -- the runner relies on exactly one resync per
+    // connect, even when empty.
     const resumable = this.config.db.listResumableSessionsForMachine(
       machine.id,
     );
@@ -499,14 +498,10 @@ export class Hub {
     ws.on("close", () => {
       if (this.runners.get(machine.id)?.ws === ws) {
         this.runners.delete(machine.id);
-        // Demote any active session to idle. Previously these were
-        // marked as `error: Runner disconnected`, which was wrong: the
-        // SDK conversation jsonl on disk is intact and the runner can
-        // resume mid-conversation as soon as it reconnects (see the
-        // resync block in handleRunnerConnection above). Idle is the
-        // honest description -- the runner isn't generating right now,
-        // but the conversation isn't lost. Machine offline-ness is
-        // already surfaced separately via `enrichedMachineList`.
+        // Demote active sessions to idle, not error: the SDK jsonl is
+        // intact and the runner will resume them on reconnect via the
+        // resync above. Machine offline-ness is surfaced separately
+        // through `enrichedMachineList`.
         const affected = this.config.db.markSessionsIdleForMachine(machine.id);
         // Reply will never come from a disconnected runner.
         this.pendingHistory.dropMatching(

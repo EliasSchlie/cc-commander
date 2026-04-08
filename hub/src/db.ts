@@ -1,10 +1,11 @@
 import Database from "better-sqlite3";
 import { randomUUID } from "node:crypto";
-import type {
-  SessionMeta,
-  SessionStatus,
-  MachineInfo,
-  ResumableSession,
+import {
+  MAX_RESUMABLE_SESSIONS,
+  type SessionMeta,
+  type SessionStatus,
+  type MachineInfo,
+  type ResumableSession,
 } from "@cc-commander/protocol";
 
 export interface AccountRow {
@@ -107,6 +108,15 @@ export class HubDb {
     this.db.exec(
       `CREATE INDEX IF NOT EXISTS idx_sessions_account_status_ended
          ON sessions (account_id, status, ended_at);`,
+    );
+    // Index for the per-machine resync hot path: every runner connect
+    // runs listResumableSessionsForMachine, and every disconnect runs
+    // markSessionsIdleForMachine. Both filter on machine_id and need
+    // an index walk instead of a table scan to scale past trivial
+    // session counts. Covers the WHERE columns and the ORDER BY.
+    this.db.exec(
+      `CREATE INDEX IF NOT EXISTS idx_sessions_machine_resync
+         ON sessions (machine_id, archived_at, last_activity DESC);`,
     );
   }
 
@@ -349,22 +359,12 @@ export class HubDb {
   }
 
   /**
-   * Demotes any active session on a machine to `idle` when the runner
-   * disconnects. Previously these were marked as `error: Runner
-   * disconnected`, which was wrong: the SDK session jsonl on disk is
-   * intact, and on the runner's next connect we resync the
-   * sessionId→sdkSessionId map (see `listResumableSessionsForMachine`)
-   * so the user can resume mid-conversation. Idle is the honest
-   * description: the runner isn't generating right now, but the
-   * conversation is preserved. Machine offline-ness is already
-   * surfaced separately via `enrichedMachineList`.
-   *
-   * `last_message_preview` is left untouched on purpose -- the prior
-   * preview ("...applying patch", "Edit src/foo.ts", etc.) is what the
-   * user wants to see in the sidebar after coming back from a network
-   * blip, not "Runner disconnected".
-   *
-   * Returns the number affected.
+   * Demotes a machine's active sessions to `idle` on runner disconnect.
+   * Not `error`: the SDK conversation jsonl on disk is intact and the
+   * next runner connect will resync the resume map (see
+   * `listResumableSessionsForMachine`). `last_message_preview` is left
+   * intact so the sidebar still shows the prior activity, not
+   * "disconnected". Returns the number affected.
    */
   markSessionsIdleForMachine(machineId: string): number {
     // Type anchor: rename a SessionStatus value and these will fail to compile.
@@ -380,18 +380,15 @@ export class HubDb {
   }
 
   /**
-   * All non-archived sessions on a machine that have an SDK session id
-   * assigned, i.e. the ones a reconnecting runner can resume. Sent on
-   * `hub_runner_resync` so the runner can rebuild the in-memory
-   * `sessionId → sdkSessionId` map it lost on restart.
-   *
-   * Capped to mirror the runner-side `MAX_SDK_SESSION_IDS` LRU bound.
-   * Most-recently-active first so a runner with thousands of historic
-   * sessions still gets the ones the user is likely to touch next.
+   * Non-archived sessions on a machine that have an SDK session id, in
+   * most-recently-active order. Sent on `hub_runner_resync` so the
+   * runner can rebuild its `sessionId → sdkSessionId` map after a
+   * restart. Capped at `MAX_RESUMABLE_SESSIONS` -- the runner's LRU
+   * uses the same constant.
    */
   listResumableSessionsForMachine(
     machineId: string,
-    limit = 1000,
+    limit = MAX_RESUMABLE_SESSIONS,
   ): ResumableSession[] {
     const rows = this.db
       .prepare(
