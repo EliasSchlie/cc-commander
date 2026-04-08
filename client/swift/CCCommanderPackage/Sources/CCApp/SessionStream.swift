@@ -130,11 +130,19 @@ public final class SessionStream {
         pendingText = ""
     }
 
+    /// One-shot history loader. Populates `entries` from a `session_history`
+    /// reply, but only if `entries` is currently empty -- a late reply that
+    /// arrives after live events (or an optimistic user message) are already
+    /// in `entries` is dropped to avoid duplication and reordering. This is
+    /// **not** a refresh API; if a future caller needs to replace existing
+    /// entries (e.g. an explicit "reload from server" action), it should
+    /// add a separate method that clears `entries` first instead of trying
+    /// to make this method reentrant.
     public func loadHistory(_ messages: [AnyCodable], error: String? = nil) {
-        // Late history reply: live events already populated entries, so
-        // replaying would duplicate and reorder. Drop the messages but
-        // still surface a degraded-state marker on the error path.
         guard entries.isEmpty else {
+            // Late history reply: live events already populated entries.
+            // Drop the historical replay but still surface a degraded-state
+            // marker on the error path so the user sees that the load failed.
             if let code = error {
                 appendEntry(.historyUnavailable(id: UUID().uuidString, code: code))
             }
