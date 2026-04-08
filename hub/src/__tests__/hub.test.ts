@@ -1064,6 +1064,54 @@ describe("metrics counters", () => {
 
     await closeWs(runnerWs);
   });
+
+  // Prevents: a malicious or buggy peer holding the hub's RSS hostage
+  // by sending a single multi-megabyte frame. ws auto-closes with 1009
+  // (Message Too Big); we just need to confirm the limit is wired and
+  // the metric increments per endpoint.
+  it("rejects oversized client frames with close 1009 and counts the metric", async () => {
+    const tokens = await auth.register("user@test.com", "pass");
+    const clientWs = await connectClient(tokens.token);
+    await new Promise((r) => setTimeout(r, 50));
+
+    const closed = new Promise<number>((resolve) => {
+      clientWs.on("close", (code) => resolve(code));
+    });
+    // 5 MiB payload, comfortably above the 4 MiB cap.
+    const huge = "x".repeat(5 * 1024 * 1024);
+    clientWs.send(
+      JSON.stringify({ type: "send_prompt", sessionId: "s", prompt: huge }),
+    );
+
+    const code = await closed;
+    assert.equal(code, 1009);
+
+    const snap = hub.metrics.snapshot();
+    assert.equal(snap["hub.oversized_frame{endpoint=client}"], 1);
+  });
+
+  it("rejects oversized runner frames with close 1009 and counts the metric", async () => {
+    const tokens = await auth.register("user@test.com", "pass");
+    const account = db.getAccountByEmail("user@test.com")!;
+    const machine = db.createMachine(account.id, "m");
+    const runnerWs = await connectRunner(machine.registrationToken);
+    void tokens;
+    await new Promise((r) => setTimeout(r, 50));
+
+    const closed = new Promise<number>((resolve) => {
+      runnerWs.on("close", (code) => resolve(code));
+    });
+    const huge = "x".repeat(5 * 1024 * 1024);
+    runnerWs.send(
+      JSON.stringify({ type: "stream_text", sessionId: "s", content: huge }),
+    );
+
+    const code = await closed;
+    assert.equal(code, 1009);
+
+    const snap = hub.metrics.snapshot();
+    assert.equal(snap["hub.oversized_frame{endpoint=runner}"], 1);
+  });
 });
 
 // ── Rate limiting ───────────────────────────────────────────────────────

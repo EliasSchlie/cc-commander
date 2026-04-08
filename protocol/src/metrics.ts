@@ -30,6 +30,7 @@ export const HUB_METRIC = {
   HISTORY_DEGRADED: "hub.history_degraded",
   DROPPED_TOOL_BLOCK: "hub.dropped_tool_block",
   RATE_LIMITED: "hub.rate_limited",
+  OVERSIZED_FRAME: "hub.oversized_frame",
 } as const;
 
 export const RUNNER_METRIC = {

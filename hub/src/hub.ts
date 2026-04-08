@@ -198,6 +198,19 @@ export class Hub {
     this.httpServer = createServer((req, res) => this.handleHttp(req, res));
     this.wss = new WebSocketServer({
       server: this.httpServer,
+      // Cap a single WebSocket frame. The ws library default is 100 MiB,
+      // far above anything the cc-commander protocol can legitimately
+      // produce: client/runner envelopes in protocol/src/index.ts are
+      // JSON objects of at most a few KB, and the largest variant,
+      // session_history, is bounded by the runner to 100 messages
+      // (MAX_RESUMABLE_SESSIONS is unrelated; the 100 cap lives on the
+      // runner replay path). A single SDK message can still embed a
+      // large tool_result (file contents, build output, grep dump), so
+      // a 1 MiB cap is too tight in the worst case; 4 MiB leaves
+      // headroom for legitimate histories while still bounding memory
+      // pressure from a single malicious or buggy frame to a safe
+      // fraction of process RSS.
+      maxPayload: 4 * 1024 * 1024,
       // Per-IP rate limit BEFORE the upgrade completes. Even rejected
       // upgrades have non-zero cost (socket alloc, handshake, FD), and
       // an attacker can hold half-open sockets to the FD ceiling. The
@@ -343,6 +356,26 @@ export class Hub {
 
   private handleConnection(ws: WebSocket, req: IncomingMessage): void {
     const url = new URL(req.url || "/", `http://localhost:${this.config.port}`);
+
+    // When an inbound frame exceeds maxPayload, ws emits an `error`
+    // event with a RangeError and then closes the socket with code
+    // 1009 (Message Too Big) on its own. Hook it here, before either
+    // endpoint-specific handler attaches, so the rejection is logged
+    // with the source IP and counted regardless of which path the
+    // offender was connecting to. The default `error` handler would
+    // otherwise throw uncaughtException on the hub process.
+    ws.on("error", (err: Error) => {
+      if (err instanceof RangeError) {
+        this.metrics.inc(HUB_METRIC.OVERSIZED_FRAME, {
+          endpoint: url.pathname === "/ws/runner" ? "runner" : "client",
+        });
+        this.log.warn("oversized websocket frame rejected", {
+          ip: clientIp(req),
+          endpoint: url.pathname,
+          err: err.message,
+        });
+      }
+    });
 
     if (url.pathname === "/ws/client") {
       this.handleClientConnection(ws, url, req);
