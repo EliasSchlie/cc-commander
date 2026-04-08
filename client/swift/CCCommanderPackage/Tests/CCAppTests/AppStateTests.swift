@@ -83,7 +83,6 @@ struct AppStateTests {
     @Test func sessionStatusUpdatesSessionAndStream() {
         let state = makeAppState()
         state.handleMessage(.sessionList(makeSessions()))
-        // Set stream to running first so flushTurn triggers
         state.sessionStreams["s1"] = SessionStream(sessionId: "s1")
         state.sessionStreams["s1"]?.status = .running
 
@@ -163,8 +162,9 @@ struct AppStateTests {
         #expect(state.lastError?.message == "Machine is offline")
     }
 
-    // Prevents: turn end doesn't flush text or advance turn boundary
-    @Test func statusChangeFromRunningTriggersFlushTurn() {
+    // Prevents: status transition out of `.running` doesn't finalize
+    // partial assistant text streamed during the turn.
+    @Test func statusChangeFromRunningFlushesPendingText() {
         let state = makeAppState()
         state.handleMessage(.sessionList(makeSessions()))
         let stream = SessionStream(sessionId: "s1")
@@ -176,6 +176,5 @@ struct AppStateTests {
         state.handleMessage(.sessionStatus(sessionId: "s1", status: .idle, lastMessagePreview: nil))
 
         #expect(stream.pendingText.isEmpty)
-        #expect(stream.currentTurnStartIndex == stream.entries.count)
     }
 }

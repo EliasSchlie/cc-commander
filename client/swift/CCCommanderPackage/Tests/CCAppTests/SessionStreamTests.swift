@@ -72,23 +72,22 @@ struct SessionStreamTests {
         }
     }
 
-    // Prevents: turn end doesn't flush text or advance turn boundary
-    @Test func flushTurnFlushesPendingTextAndAdvancesTurn() {
+    // Prevents: turn end doesn't flush partial assistant text into entries
+    @Test func flushPendingTextFinalizesPartialAssistantText() {
         let stream = SessionStream(sessionId: "s1")
         stream.appendText("Response text")
         stream.addToolCall(toolCallId: "t1", toolName: "Read", display: "Read file")
         stream.appendText("More text")
 
-        stream.flushTurn()
+        stream.flushPendingText()
 
         #expect(stream.pendingText.isEmpty)
         // Should have: assistantText, toolCall, assistantText
         #expect(stream.entries.count == 3)
-        #expect(stream.currentTurnStartIndex == stream.entries.count)
 
-        // A new turn appends past the boundary
+        // A second flush after a new partial appends another entry
         stream.appendText("New turn text")
-        stream.flushTurn()
+        stream.flushPendingText()
         #expect(stream.entries.count == 4)
     }
 
@@ -207,8 +206,6 @@ struct SessionStreamTests {
         if case .assistantText(_, let text) = stream.entries[1] {
             #expect(text == "Hi there")
         }
-        // History counts as completed turn
-        #expect(stream.currentTurnStartIndex == 2)
     }
 
     // Prevents #14: tool_use/tool_result blocks dropped on history reload
@@ -339,30 +336,6 @@ struct SessionStreamTests {
         #expect(stream.entries.count == cap + 1)
     }
 
-    // Prevents: currentTurnStartIndex pointing past end-of-array after
-    // eviction, breaking the "current turn" rendering split. The marker
-    // insertion at index 0 must shift currentTurnStartIndex by 1 so it
-    // still points at the same logical entry.
-    @Test func evictionAdjustsCurrentTurnStartIndex() {
-        let stream = SessionStream(sessionId: "s1")
-        stream.addError("first")
-        stream.flushTurn()
-        #expect(stream.currentTurnStartIndex == 1)
-        // Push enough entries to evict "first" -- triggers marker insert.
-        for i in 0..<SessionStream.maxEntries {
-            stream.addError("e\(i)")
-        }
-        #expect(stream.entries.count == SessionStream.maxEntries + 1)
-        // After eviction: index 0 is the marker. currentTurnStartIndex
-        // started at 1, was decremented to 0 by overflow trim, then
-        // bumped to 1 by marker insertion -- so it still points just
-        // past the marker (i.e. at the first real entry of the turn).
-        #expect(stream.currentTurnStartIndex == 1)
-        if case .evictionMarker = stream.entries[0] {} else {
-            Issue.record("entries[0] should be marker")
-        }
-    }
-
     // Prevents: loadHistory bypassing the entry cap (regression: the
     // initial #28 PR routed live appends through appendEntry but left
     // loadHistory's raw entries.append untouched, defeating the cap
@@ -405,61 +378,11 @@ struct SessionStreamTests {
         }
     }
 
-    // Prevents: currentTurnStartIndex drifting past `entries.count`
-    // after multiple coalesced evictions when the turn started at an
-    // entry that stays alive. Locks the invariant that the index always
-    // points at a real entry inside `entries` (or at `entries.count`).
-    @Test func turnStartSurvivesMultipleCoalescedEvictions() {
-        let stream = SessionStream(sessionId: "s1")
-        let cap = SessionStream.maxEntries
-        // Fill cap-50 entries, flushTurn, then append the rest of cap
-        // so turnStart points at a live entry near the tail.
-        for i in 0..<(cap - 50) {
-            stream.addError("pre\(i)")
-        }
-        stream.flushTurn()
-        let turnStartBefore = stream.currentTurnStartIndex
-        #expect(turnStartBefore == cap - 50)
-        // Append enough to trigger several distinct overflow batches.
-        for i in 0..<(cap * 2) {
-            stream.addError("post\(i)")
-        }
-        // Index must still be inside entries and point at a real entry.
-        #expect(stream.currentTurnStartIndex < stream.entries.count)
-        #expect(stream.currentTurnStartIndex >= 1) // past the marker
-        if case .evictionMarker = stream.entries[stream.currentTurnStartIndex] {
-            Issue.record("turn start should not point at the marker")
-        }
-    }
-
-    // Prevents: turnStart==0 ("entire session is current turn") being
-    // mishandled when the entry at index 0 is itself evicted. After the
-    // marker is inserted, the turn must logically span the surviving
-    // real entries -- i.e. start at index 1, just past the marker.
-    @Test func evictionFromTurnStartZeroPointsPastMarker() {
-        let stream = SessionStream(sessionId: "s1")
-        let cap = SessionStream.maxEntries
-        // Fill exactly to cap so currentTurnStartIndex stays at 0 (no
-        // flushTurn ever called).
-        for i in 0..<cap {
-            stream.addError("e\(i)")
-        }
-        #expect(stream.currentTurnStartIndex == 0)
-        // Trigger first overflow.
-        stream.addError("trigger")
-        // Expect: marker at 0, surviving real entries [1...cap], turn
-        // start at 1 (first real entry).
-        #expect(stream.entries.count == cap + 1)
-        #expect(stream.currentTurnStartIndex == 1)
-        if case .evictionMarker = stream.entries[0] {} else {
-            Issue.record("entries[0] should be marker")
-        }
-    }
-
-    // Prevents: marker coalescing math drifting after a flushTurn() in
-    // the middle of an evicting session -- the turn boundary must move
-    // with the trim, and the marker count must accumulate across it.
-    @Test func evictionMarkerCoalescesAcrossFlushTurn() {
+    // Prevents: marker coalescing math drifting when a flushPendingText()
+    // (which itself appends an entry through `appendEntry`) lands in the
+    // middle of an evicting session -- the marker count must accumulate
+    // across the flush instead of producing a second marker.
+    @Test func evictionMarkerCoalescesAcrossFlush() {
         let stream = SessionStream(sessionId: "s1")
         let cap = SessionStream.maxEntries
         for i in 0..<(cap + 20) {
@@ -470,7 +393,10 @@ struct SessionStreamTests {
         } else {
             Issue.record("expected marker after first batch")
         }
-        stream.flushTurn()
+        // Stream partial text and flush, so the flush actually appends an
+        // entry through `appendEntry` (and triggers another overflow trim).
+        stream.appendText("partial text")
+        stream.flushPendingText()
         for i in 0..<30 {
             stream.addError("late\(i)")
         }
@@ -480,7 +406,9 @@ struct SessionStreamTests {
         }
         #expect(markers.count == 1)
         if case .evictionMarker(_, let dropped) = stream.entries.first {
-            #expect(dropped == 50)
+            // 20 from the first batch + 1 from the flush + 30 from the
+            // late batch = 51 evicted entries, all coalesced into one marker.
+            #expect(dropped == 51)
         } else {
             Issue.record("expected coalesced marker")
         }
@@ -508,13 +436,4 @@ struct SessionStreamTests {
         }
     }
 
-    // Prevents: isGenerating not accurate during running status
-    @Test func isGeneratingReflectsStatus() {
-        let stream = SessionStream(sessionId: "s1")
-        #expect(stream.isGenerating == false)
-        stream.status = .running
-        #expect(stream.isGenerating == true)
-        stream.status = .idle
-        #expect(stream.isGenerating == false)
-    }
 }

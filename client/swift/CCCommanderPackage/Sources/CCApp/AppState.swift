@@ -176,14 +176,14 @@ public final class AppState {
             let wasGenerating = stream.status == .running
             stream.status = status
             if wasGenerating && status != .running {
-                stream.flushTurn()
+                stream.flushPendingText()
             }
 
         case .sessionDone(let payload):
             updateSession(payload.sessionId) { $0.status = .idle }
             let stream = streamFor(payload.sessionId)
             stream.status = .idle
-            stream.flushTurn()
+            stream.flushPendingText()
 
         case .sessionError(let sessionId, let error):
             updateSession(sessionId) { $0.status = .error }
