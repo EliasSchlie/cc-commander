@@ -118,6 +118,12 @@ export class HubDb {
       `CREATE INDEX IF NOT EXISTS idx_sessions_machine_resync
          ON sessions (machine_id, archived_at, last_activity DESC);`,
     );
+    // Supports the panic button's bulk delete (deleteRefreshTokensForAccount)
+    // without a table scan. Cheap even for a personal deployment.
+    this.db.exec(
+      `CREATE INDEX IF NOT EXISTS idx_refresh_tokens_account
+         ON refresh_tokens (account_id);`,
+    );
   }
 
   /**
@@ -441,8 +447,7 @@ export class HubDb {
   /**
    * Bulk revoke: drops every refresh token owned by one account. Used
    * by the panic button so a compromised device can't refresh its way
-   * back in after the user hits the kill switch. Returns rows deleted
-   * for observability (tests assert on it; production doesn't care).
+   * back in after the user hits the kill switch. Returns rows deleted.
    */
   deleteRefreshTokensForAccount(accountId: string): number {
     const result = this.db

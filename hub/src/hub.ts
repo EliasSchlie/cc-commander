@@ -30,9 +30,6 @@ import {
 import { handleRunnerMessage } from "./ws/runnerMessage.ts";
 import type { WsContext } from "./ws/context.ts";
 
-// Private close code for panic-button revocations (see panicAccount).
-const PANIC_CLOSE_CODE = 4003;
-
 export interface HubConfig {
   port: number;
   db: HubDb;
@@ -648,7 +645,7 @@ export class Hub {
     const clientBucket = this.clientsByAccount.get(accountId);
     const clients = clientBucket ? Array.from(clientBucket) : [];
     for (const conn of clients) {
-      conn.ws.close(PANIC_CLOSE_CODE, "Revoked by panic");
+      conn.ws.close(4003, "Revoked by panic");
     }
 
     const runners: RunnerConnection[] = [];
@@ -656,7 +653,7 @@ export class Hub {
       if (conn.accountId === accountId) runners.push(conn);
     }
     for (const conn of runners) {
-      conn.ws.close(PANIC_CLOSE_CODE, "Revoked by panic");
+      conn.ws.close(4003, "Revoked by panic");
     }
 
     this.log.warn("panic triggered", {
