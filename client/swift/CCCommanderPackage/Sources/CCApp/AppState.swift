@@ -123,6 +123,13 @@ public final class AppState {
         try await connection.archiveSession(sessionId: sessionId)
     }
 
+    /// Panic button: revoke all tokens and kick all sessions on this
+    /// account. Forwards to `HubConnection.panic()`, which also calls
+    /// `logout()` so local state returns to the auth screen on success.
+    public func panic() async throws {
+        try await connection.panic()
+    }
+
     public func recordError(_ message: String) {
         lastError = HubErrorToast(message: message)
     }

@@ -7,6 +7,7 @@ struct SessionListView: View {
     @State private var showingNewSession = false
     @State private var filterStatus: SessionStatus?
     @State private var filterMachine: String?
+    @State private var showingPanicConfirm = false
 
     var filteredSessions: [SessionMeta] {
         appState.sortedSessions.filter { session in
@@ -61,9 +62,29 @@ struct SessionListView: View {
                 }
             }
             #endif
+
+            ToolbarItem(placement: .automatic) {
+                Menu {
+                    Button("Panic: Kick All Devices", systemImage: "exclamationmark.triangle.fill", role: .destructive) {
+                        showingPanicConfirm = true
+                    }
+                } label: {
+                    Label("Account", systemImage: "person.circle")
+                }
+            }
         }
         .sheet(isPresented: $showingNewSession) {
             NewSessionSheet()
+        }
+        .confirmationDialog(
+            "Revoke all sessions?",
+            isPresented: $showingPanicConfirm,
+            titleVisibility: .visible
+        ) {
+            Button("Kick All Devices", role: .destructive) { triggerPanic() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This will sign out every client and runner on your account and revoke all stored tokens. You will need to sign back in.")
         }
         .overlay {
             if filteredSessions.isEmpty {
@@ -96,6 +117,16 @@ struct SessionListView: View {
                 try await appState.archiveSession(sessionId: session.sessionId)
             } catch {
                 appState.recordError("Failed to archive session: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    private func triggerPanic() {
+        Task {
+            do {
+                try await appState.panic()
+            } catch {
+                appState.recordError("Panic failed: \(error.localizedDescription)")
             }
         }
     }

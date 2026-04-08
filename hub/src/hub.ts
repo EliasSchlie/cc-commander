@@ -17,6 +17,7 @@ import { PendingHistoryStore } from "./state/pendingHistory.ts";
 import type { ClientConnection, RunnerConnection } from "./ws/types.ts";
 import { handleAuthEndpoint, handleRefreshEndpoint } from "./routes/auth.ts";
 import { handleCreateMachine } from "./routes/machines.ts";
+import { handlePanic } from "./routes/panic.ts";
 import { handleHealth, handleVersion } from "./routes/health.ts";
 import { handleDebugState } from "./routes/debug.ts";
 import type { DebugSnapshot, RouteContext } from "./routes/types.ts";
@@ -28,6 +29,9 @@ import {
 } from "./ws/clientMessage.ts";
 import { handleRunnerMessage } from "./ws/runnerMessage.ts";
 import type { WsContext } from "./ws/context.ts";
+
+// Private close code for panic-button revocations (see panicAccount).
+const PANIC_CLOSE_CODE = 4003;
 
 export interface HubConfig {
   port: number;
@@ -66,6 +70,11 @@ export interface HubConfig {
      *  upgrades have non-zero cost (socket alloc, handshake). Default
      *  30/min/IP. */
     wsUpgrade?: { capacity: number; perMinute: number };
+    /** Per-account cap on /api/auth/panic. Default 10/hour. Intentionally
+     *  low: the button is destructive (kicks every device on the
+     *  account) and a legitimate user needs at most a handful of uses
+     *  per day. */
+    panic?: { capacity: number; perHour: number };
   };
   /**
    * Inject a Metrics instance (mostly for tests, which want a fast
@@ -108,6 +117,7 @@ export class Hub {
   machineCreateLimiter: TokenBucketRateLimiter;
   machineCreateIpLimiter: TokenBucketRateLimiter;
   wsUpgradeLimiter: TokenBucketRateLimiter;
+  panicLimiter: TokenBucketRateLimiter;
   /**
    * All limiter instances in one place so start/stop sweeping is a
    * single loop. Adding a new limiter only requires registering it
@@ -161,6 +171,10 @@ export class Hub {
       capacity: 30,
       perMinute: 30,
     };
+    const panic = config.rateLimits?.panic ?? {
+      capacity: 10,
+      perHour: 10,
+    };
     this.loginLimiter = new TokenBucketRateLimiter({
       capacity: login.capacity,
       refillPerMs: login.perMinute / 60_000,
@@ -185,6 +199,10 @@ export class Hub {
       capacity: wsUpgrade.capacity,
       refillPerMs: wsUpgrade.perMinute / 60_000,
     });
+    this.panicLimiter = new TokenBucketRateLimiter({
+      capacity: panic.capacity,
+      refillPerMs: panic.perHour / 3_600_000,
+    });
     this.limiters = [
       this.loginLimiter,
       this.registerLimiter,
@@ -192,6 +210,7 @@ export class Hub {
       this.machineCreateLimiter,
       this.machineCreateIpLimiter,
       this.wsUpgradeLimiter,
+      this.panicLimiter,
     ];
     this.metrics = config.metrics ?? new Metrics();
 
@@ -265,7 +284,9 @@ export class Hub {
       refreshLimiter: this.refreshLimiter,
       machineCreateLimiter: this.machineCreateLimiter,
       machineCreateIpLimiter: this.machineCreateIpLimiter,
+      panicLimiter: this.panicLimiter,
       broadcastMachineList: (accountId) => this.broadcastMachineList(accountId),
+      panicAccount: (accountId) => this.panicAccount(accountId),
       version: this.config.version ?? "",
       // Debug endpoint reads live state directly off the Hub. Closure
       // (rather than passing the Hub class) keeps routes/ from
@@ -327,6 +348,9 @@ export class Hub {
     }
     if (req.method === "POST" && url.pathname === "/api/auth/refresh") {
       return handleRefreshEndpoint(ctx, req, res);
+    }
+    if (req.method === "POST" && url.pathname === "/api/auth/panic") {
+      return handlePanic(ctx, req, res);
     }
     if (req.method === "POST" && url.pathname === "/api/machines") {
       return handleCreateMachine(ctx, req, res);
@@ -603,6 +627,43 @@ export class Hub {
     this.relayToClients(accountId, {
       type: "machine_list",
       machines: this.enrichedMachineList(accountId),
+    });
+  }
+
+  /**
+   * Destructive account-wide session kill. Deletes every refresh
+   * token and closes every open client/runner WebSocket for the
+   * account with close code 4003. Private so routes/ never see the
+   * raw WebSocket map; exposed via the `panicAccount` closure on
+   * RouteContext, matching the `broadcastMachineList` pattern.
+   */
+  private panicAccount(accountId: string): void {
+    const refreshDeleted =
+      this.config.db.deleteRefreshTokensForAccount(accountId);
+
+    // Snapshot to an array before closing: each ws.close() triggers
+    // the 'close' handler synchronously on some ws paths which calls
+    // removeClient and mutates the underlying Set, breaking mid-loop
+    // iteration otherwise.
+    const clientBucket = this.clientsByAccount.get(accountId);
+    const clients = clientBucket ? Array.from(clientBucket) : [];
+    for (const conn of clients) {
+      conn.ws.close(PANIC_CLOSE_CODE, "Revoked by panic");
+    }
+
+    const runners: RunnerConnection[] = [];
+    for (const conn of this.runners.values()) {
+      if (conn.accountId === accountId) runners.push(conn);
+    }
+    for (const conn of runners) {
+      conn.ws.close(PANIC_CLOSE_CODE, "Revoked by panic");
+    }
+
+    this.log.warn("panic triggered", {
+      accountId,
+      refreshTokensDeleted: refreshDeleted,
+      clientsClosed: clients.length,
+      runnersClosed: runners.length,
     });
   }
 

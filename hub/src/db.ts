@@ -438,6 +438,19 @@ export class HubDb {
     this.db.prepare("DELETE FROM refresh_tokens WHERE token = ?").run(token);
   }
 
+  /**
+   * Bulk revoke: drops every refresh token owned by one account. Used
+   * by the panic button so a compromised device can't refresh its way
+   * back in after the user hits the kill switch. Returns rows deleted
+   * for observability (tests assert on it; production doesn't care).
+   */
+  deleteRefreshTokensForAccount(accountId: string): number {
+    const result = this.db
+      .prepare("DELETE FROM refresh_tokens WHERE account_id = ?")
+      .run(accountId);
+    return result.changes;
+  }
+
   close(): void {
     this.db.close();
   }

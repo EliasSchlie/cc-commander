@@ -1859,3 +1859,145 @@ describe("session lifecycle in DB", () => {
     assert.equal(recovered.endedAt, null);
   });
 });
+
+// ── Panic button (/api/auth/panic) ──────────────────────────────────────
+
+describe("POST /api/auth/panic", () => {
+  // Prevents: unauthenticated callers nuking someone else's sessions
+  it("returns 401 without a bearer token", async () => {
+    const res = await fetch(`${baseUrl}/api/auth/panic`, { method: "POST" });
+    assert.equal(res.status, 401);
+  });
+
+  // Prevents: panic button silently failing for a valid caller
+  it("returns 204 with a valid bearer token", async () => {
+    const tokens = await auth.register("panic1@test.com", "password");
+    const res = await fetch(`${baseUrl}/api/auth/panic`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${tokens.token}` },
+    });
+    assert.equal(res.status, 204);
+  });
+
+  // Prevents: a compromised device refreshing its way back in after panic
+  it("deletes every refresh token for the caller's account", async () => {
+    const tokens = await auth.register("panic2@test.com", "password");
+    const accountId = auth.verifyToken(tokens.token).accountId;
+    // Mint a second refresh token so we're sure ALL are wiped, not just one.
+    db.createRefreshToken(
+      accountId,
+      new Date(Date.now() + 86_400_000).toISOString(),
+    );
+    const res = await fetch(`${baseUrl}/api/auth/panic`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${tokens.token}` },
+    });
+    assert.equal(res.status, 204);
+    assert.equal(db.getRefreshToken(tokens.refreshToken), undefined);
+  });
+
+  // Prevents: the button leaving stale client WebSockets alive
+  it("closes open client WebSockets with code 4003", async () => {
+    const tokens = await auth.register("panic3@test.com", "password");
+    const clientWs = await connectClient(tokens.token);
+    const closeCode = new Promise<number>((resolve) => {
+      clientWs.on("close", (code) => resolve(code));
+    });
+    const res = await fetch(`${baseUrl}/api/auth/panic`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${tokens.token}` },
+    });
+    assert.equal(res.status, 204);
+    assert.equal(await closeCode, 4003);
+  });
+
+  // Prevents: runner for the account surviving a panic and keeping a
+  // long-lived session alive
+  it("closes open runner WebSockets for the account with code 4003", async () => {
+    const tokens = await auth.register("panic4@test.com", "password");
+    const accountId = auth.verifyToken(tokens.token).accountId;
+    const machine = db.createMachine(accountId, "lab");
+    const runnerWs = await connectRunner(machine.registrationToken);
+    const closeCode = new Promise<number>((resolve) => {
+      runnerWs.on("close", (code) => resolve(code));
+    });
+    const res = await fetch(`${baseUrl}/api/auth/panic`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${tokens.token}` },
+    });
+    assert.equal(res.status, 204);
+    assert.equal(await closeCode, 4003);
+  });
+
+  // Prevents: cross-account blast radius (A hits panic, B loses sessions)
+  it("does not affect clients on a different account", async () => {
+    const a = await auth.register("panicA@test.com", "password");
+    const b = await auth.register("panicB@test.com", "password");
+    const wsB = await connectClient(b.token);
+    let bClosed = false;
+    wsB.on("close", () => {
+      bClosed = true;
+    });
+    const res = await fetch(`${baseUrl}/api/auth/panic`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${a.token}` },
+    });
+    assert.equal(res.status, 204);
+    // Give the hub a tick to propagate any (erroneous) close.
+    await new Promise((r) => setTimeout(r, 100));
+    assert.equal(bClosed, false);
+    assert.equal(wsB.readyState, WebSocket.OPEN);
+    await closeWs(wsB);
+  });
+
+  // Prevents: silent panic (no metric bump means no dashboards, no audit)
+  it("increments hub.panic_triggered on success", async () => {
+    const tokens = await auth.register("panicM@test.com", "password");
+    const before = hub.metrics.snapshot()["hub.panic_triggered"] ?? 0;
+    const res = await fetch(`${baseUrl}/api/auth/panic`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${tokens.token}` },
+    });
+    assert.equal(res.status, 204);
+    const after = hub.metrics.snapshot()["hub.panic_triggered"] ?? 0;
+    assert.equal(after - before, 1);
+  });
+
+  // Prevents: unbounded abuse (an attacker with a stolen JWT spamming
+  // the button to force-logout everyone else on the same account)
+  it("rate limits per-account and returns 429 past the cap", async () => {
+    await hub.stop();
+    db.close();
+    db = new HubDb(":memory:");
+    auth = new AuthService(db, JWT_SECRET);
+    hub = new Hub({
+      port: 0,
+      db,
+      auth,
+      rateLimits: {
+        login: { capacity: 100, perMinute: 100 },
+        register: { capacity: 100, perMinute: 100 },
+        machineCreate: { capacity: 100, perHour: 100 },
+        // Capacity 1, refill essentially never for the test window.
+        panic: { capacity: 1, perHour: 0.0001 },
+      },
+    });
+    await hub.start();
+    const addr = hub.httpServer.address();
+    port = typeof addr === "object" && addr ? addr.port : 0;
+    baseUrl = `http://localhost:${port}`;
+
+    const tokens = await auth.register("panicL@test.com", "password");
+    const r1 = await fetch(`${baseUrl}/api/auth/panic`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${tokens.token}` },
+    });
+    const r2 = await fetch(`${baseUrl}/api/auth/panic`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${tokens.token}` },
+    });
+    assert.equal(r1.status, 204);
+    assert.equal(r2.status, 429);
+    assert.equal(hub.metrics.snapshot()["hub.rate_limited{limiter=panic}"], 1);
+  });
+});

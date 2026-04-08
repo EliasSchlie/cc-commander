@@ -26,9 +26,17 @@ export interface RouteContext {
   refreshLimiter: TokenBucketRateLimiter;
   machineCreateLimiter: TokenBucketRateLimiter;
   machineCreateIpLimiter: TokenBucketRateLimiter;
+  panicLimiter: TokenBucketRateLimiter;
   /** Called after a successful machine create so the Hub can push the
    *  refreshed list to all connected clients on the owning account. */
   broadcastMachineList(accountId: string): void;
+  /**
+   * Panic button: revoke every refresh token for the account and
+   * close every open client and runner WebSocket owned by that
+   * account with code 4003. Closure (not a Hub reference) keeps
+   * routes/ decoupled from hub.ts; see `broadcastMachineList`.
+   */
+  panicAccount(accountId: string): void;
   /** Hub's version string from config (empty string if unset). */
   version: string;
   /**

@@ -41,6 +41,12 @@ public final class TestHarness {
         logResult("logout", ok: true)
     }
 
+    public func panic() async throws {
+        log("panic")
+        try await appState.panic()
+        logResult("panic", ok: true)
+    }
+
     // MARK: - Session control
 
     public func startSession(machineId: String, directory: String, prompt: String) async throws {
