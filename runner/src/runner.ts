@@ -204,13 +204,20 @@ export class MachineRunner {
    * dropping all history. Replaces the map outright -- the hub's view
    * is canonical and any stale local entries should be dropped. The
    * slice is a protocol-boundary cap against an oversized payload.
+   *
+   * The hub sends sessions in most-recently-active-first order.
+   * `sdkSessionIds` uses Map insertion order as its LRU proxy (the
+   * post-session eviction in the `runSession` finally block calls
+   * `keys().next().value`), so we insert in reverse so the oldest
+   * lands first and gets evicted first under cap pressure.
    */
   private handleResync(
     sessions: ReadonlyArray<{ sessionId: string; sdkSessionId: string }>,
   ): void {
     this.sdkSessionIds = new Map();
     const capped = sessions.slice(0, MAX_RESUMABLE_SESSIONS);
-    for (const { sessionId, sdkSessionId } of capped) {
+    for (let i = capped.length - 1; i >= 0; i--) {
+      const { sessionId, sdkSessionId } = capped[i]!;
       this.sdkSessionIds.set(sessionId, sdkSessionId);
     }
     this.log.info("runner resync applied", {

@@ -733,4 +733,42 @@ describe("hub_runner_resync", () => {
     );
     runner.disconnect();
   });
+
+  // Prevents: post-session LRU eviction kicking out the most-recently-
+  // active session instead of the oldest. The hub sends sessions in
+  // most-recently-active-first order; if handleResync inserts in that
+  // order, the Map's iteration order puts MRU first, and the
+  // `keys().next().value` eviction in runSession's finally block then
+  // evicts the wrong end.
+  it("preserves LRU order under post-resync cap eviction", async () => {
+    const runner = new MachineRunner({
+      hubUrl: `ws://localhost:${hubPort}`,
+      registrationToken: "test-token",
+      machineName: "Test",
+      queryFn: mockQueryWithResult("done", "sdk-x"),
+    });
+    await runner.connect();
+    await waitForRunnerMsg((m) => m.type === "runner_hello");
+
+    // Resync in MRU-first order, the wire convention.
+    sendToRunner({
+      type: "hub_runner_resync",
+      sessions: [
+        { sessionId: "s-newest", sdkSessionId: "sdk-newest" },
+        { sessionId: "s-middle", sdkSessionId: "sdk-middle" },
+        { sessionId: "s-oldest", sdkSessionId: "sdk-oldest" },
+      ],
+    });
+    await new Promise((r) => setTimeout(r, 50));
+
+    // The first key in iteration order is the eviction victim. It
+    // should be the OLDEST (s-oldest), not the newest.
+    const firstKey = runner.sdkSessionIds.keys().next().value;
+    assert.equal(
+      firstKey,
+      "s-oldest",
+      "oldest entry must be at the head of the eviction order",
+    );
+    runner.disconnect();
+  });
 });
