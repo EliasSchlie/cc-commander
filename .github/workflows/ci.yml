@@ -1,5 +1,21 @@
 name: CI
 
+# IMPORTANT: the four check names produced by this workflow are
+# referenced verbatim by the `main` branch protection rule:
+#   - "protocol (Node)"   (jobs.node, matrix workspace=protocol)
+#   - "hub (Node)"        (jobs.node, matrix workspace=hub)
+#   - "runner (Node)"     (jobs.node, matrix workspace=runner)
+#   - "Swift package + macOS app"  (jobs.swift)
+# Renaming any of these without updating the protection rule will
+# silently make every PR unmergeable -- the rule waits forever for a
+# check that no longer exists. To keep both in sync, first GET the
+# current rule, edit `required_status_checks.contexts`, then PUT the
+# full payload back -- a partial PUT silently wipes the unspecified
+# fields:
+#   gh api repos/EliasSchlie/cc-commander/branches/main/protection \
+#     | jq '...'  # edit contexts here
+#     | gh api -X PUT repos/EliasSchlie/cc-commander/branches/main/protection --input -
+
 on:
   push:
     branches: [main]
