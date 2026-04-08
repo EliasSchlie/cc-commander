@@ -62,13 +62,6 @@ public final class SessionStream {
     public var status: SessionStatus = .idle
     public var pendingPrompt: UserPromptPayload?
 
-    /// Index in `entries` where the current turn began. Tool calls at or after
-    /// this index are considered part of the current (in-progress) turn and
-    /// rendered expanded; earlier ones are collapsed by default.
-    public var currentTurnStartIndex: Int = 0
-
-    public var isGenerating: Bool { status == .running }
-
     public init(sessionId: String) {
         self.sessionId = sessionId
     }
@@ -129,9 +122,13 @@ public final class SessionStream {
         appendEntry(.error(id: UUID().uuidString, message: message))
     }
 
-    public func flushTurn() {
-        flushPendingText()
-        currentTurnStartIndex = entries.count
+    /// Move any in-progress streamed assistant text into a finalized
+    /// `.assistantText` entry. Called when a turn ends or when a new
+    /// non-text entry needs to be appended after partial text.
+    public func flushPendingText() {
+        guard !pendingText.isEmpty else { return }
+        appendEntry(.assistantText(id: UUID().uuidString, text: pendingText))
+        pendingText = ""
     }
 
     public func loadHistory(_ messages: [AnyCodable], error: String? = nil) {
@@ -213,7 +210,6 @@ public final class SessionStream {
             // an empty pane that's indistinguishable from "no history".
             appendEntry(.historyUnavailable(id: UUID().uuidString, code: code))
         }
-        currentTurnStartIndex = entries.count
     }
 
     /// Mirrors the runner's `formatToolDisplay`. Kept here so reloads from
@@ -248,21 +244,12 @@ public final class SessionStream {
 
     // MARK: - Private
 
-    private func flushPendingText() {
-        guard !pendingText.isEmpty else { return }
-        appendEntry(.assistantText(id: UUID().uuidString, text: pendingText))
-        pendingText = ""
-    }
-
-    /// Append `entry` to `entries`, evicting the oldest entries if the cap
-    /// is exceeded. Adjusts `currentTurnStartIndex` so it still points at
-    /// the same logical entry (or 0 if that entry was evicted). When
-    /// eviction happens, an `.evictionMarker` is inserted/updated at the
-    /// head so the user can see how many entries were dropped.
-    ///
-    /// The marker itself does NOT count toward `maxEntries` -- treating
-    /// it as overhead keeps the cap math simple and the +1 entry is
-    /// negligible against a 500-entry cap.
+    /// Append `entry`, evicting the oldest entries if the cap is exceeded.
+    /// When eviction happens, an `.evictionMarker` is inserted/updated at
+    /// the head so the user can see how many entries were dropped. The
+    /// marker itself does NOT count toward `maxEntries` -- treating it as
+    /// overhead keeps the cap math simple and the +1 entry is negligible
+    /// against a 500-entry cap.
     private func appendEntry(_ entry: SessionEntry) {
         entries.append(entry)
         let realCount = entries.count - (hasEvictionMarker ? 1 : 0)
@@ -271,7 +258,6 @@ public final class SessionStream {
 
         let removeStart = hasEvictionMarker ? 1 : 0
         entries.removeSubrange(removeStart..<(removeStart + overflow))
-        currentTurnStartIndex = max(removeStart, currentTurnStartIndex - overflow)
         recordDropped(count: overflow)
     }
 
@@ -291,7 +277,5 @@ public final class SessionStream {
             .evictionMarker(id: UUID().uuidString, droppedCount: count),
             at: 0
         )
-        // The inserted marker shifts every later index by 1.
-        currentTurnStartIndex += 1
     }
 }
