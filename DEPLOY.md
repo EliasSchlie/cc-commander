@@ -83,6 +83,19 @@ device build yet.
 
 ### 4. Register runners the same way, using the tailnet URL
 
+Use whichever scheme matches the option you picked above. With
+Option A (no TLS) the hub speaks plain HTTP on port 3000:
+
+```sh
+node --experimental-strip-types src/cli.ts register \
+    --hub http://hub.tail1234.ts.net:3000 \
+    --email you@example.com \
+    --name "mac-mini-living-room"
+```
+
+With Option B (`tailscale serve` with TLS) the hub is reachable
+over HTTPS on the default port:
+
 ```sh
 node --experimental-strip-types src/cli.ts register \
     --hub https://hub.tail1234.ts.net \
@@ -96,9 +109,11 @@ Everything else in the "Runner on a Mac" section below still applies.
 
 By default every device on your tailnet can talk to every other
 device on every port. You can tighten this so that only your client
-devices can reach the hub's port 443, and runners are only allowed
-to egress to the hub (not to each other, not to clients). Edit your
-tailnet policy in the Tailscale admin console:
+devices can reach the hub, and runners are only allowed to egress
+to the hub (not to each other, not to clients). Edit your tailnet
+policy in the Tailscale admin console. The example below uses
+`tag:hub:443` (Option B); if you went with Option A, swap the two
+`dst` entries to `tag:hub:3000`.
 
 ```json
 {
