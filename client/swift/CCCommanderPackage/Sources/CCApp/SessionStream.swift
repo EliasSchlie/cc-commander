@@ -122,9 +122,8 @@ public final class SessionStream {
         appendEntry(.error(id: UUID().uuidString, message: message))
     }
 
-    /// Move any in-progress streamed assistant text into a finalized
-    /// `.assistantText` entry. Called when a turn ends or when a new
-    /// non-text entry needs to be appended after partial text.
+    /// Finalize any in-progress streamed assistant text into a real
+    /// `.assistantText` entry. Called by `AppState` when a turn ends.
     public func flushPendingText() {
         guard !pendingText.isEmpty else { return }
         appendEntry(.assistantText(id: UUID().uuidString, text: pendingText))
