@@ -31,6 +31,8 @@ See [`DEPLOY.md`](DEPLOY.md) for an end-to-end guide: hub on a VPS,
 runner on a Mac, client app on your laptop. There's also a
 "local all-in-one" section if you just want to try it on one machine.
 
+See [`SECURITY.md`](SECURITY.md) for the threat model and recommended deployment.
+
 ## Repository
 
 Monorepo. Each component builds, tests, and deploys independently. They share no runtime code -- they communicate only over the network.
